@@ -24,10 +24,10 @@ Download and install **3D Slicer 5.x** from <https://download.slicer.org>. It wa
 
 ### Step 2: Download this repository
 Pick **one** of these:
-- **Without git:** on this repository's GitHub page, click the green **Code** button, then **Download ZIP**. Unzip it somewhere permanent, for example `Documents\VesselPrintErrorChecker`, not your Downloads folder, because Slicer will load the module from there every time it starts.
+- **Without git:** on <https://github.com/chrystalight/VesselPrintErrorChecker>, click the green **Code** button, then **Download ZIP**. Unzip it somewhere permanent, for example `Documents\VesselPrintErrorChecker`, not your Downloads folder, because Slicer will load the module from there every time it starts.
 - **With git:**
   ```
-  git clone https://github.com/<owner>/VesselPrintErrorChecker.git
+  git clone https://github.com/chrystalight/VesselPrintErrorChecker.git
   ```
 
 The download is about 700 MB, almost all of it the SIMONE sample CT scans.
