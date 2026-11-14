@@ -5,7 +5,7 @@ These are CT scans, designs and centerlines for the three printed vessel modules
 | Vessel | Material | CT (`CT/`) | Design (`design.stl`) | Branch centerlines (`centerlines/*.pth`) | Notes |
 |---|---|---|---|---|---|
 | Torso | elastic | 396 slices, 0.465 mm | aortic arch lumen | Aorta, Left/Right Common Carotid, Left/Right Subclavian | water was pooled in the lower aorta during scanning, so ~15–55 mm along *Aorta* reads 1–3 mm narrow (the contour follows the water surface); this stretch is excluded by default (`exclude_mm` in `samples.json`, shown in the module's *Exclude ranges* field) |
-| Cranial | rigid | 508 slices, 0.362 mm | carotid lumen | ICA, ECA, OPTH | some sections held water during scanning (no lumen contrast) and are excluded; OPTH is ~1–1.5 mm, near the resolution limit |
+| Cranial | rigid | 508 slices, 0.362 mm | carotid lumen | ICA, ECA, OPTH | parts of the lumen held water during scanning; fully filled stretches are measured from the water/wall edge (`fluid_filled` = 1); OPTH is ~1–1.5 mm, near the resolution limit |
 | Femoral | elastic | 396 slices, 0.465 mm | aorto-iliac lumen | DescendingAorta, LeftIliac, RightIliac | an introducer sheath lies in each iliac, so *Treat bright insert as lumen* (HU ≥ 600) is on; the iliacs are measured with the sheath counted as lumen and are noisier (±0.3 mm) than the aorta |
 
 ## What's in the files
@@ -19,7 +19,7 @@ Some branch paths start in a common trunk and run along it together. The trunk i
 - **Torso:** RightCommonCarotid and RightSubclavian share the brachiocephalic trunk, which is counted under RightCommonCarotid.
 
 ## Where Cranial loses stations
-- **No air in the lumen** (`no lumen near path`, plus 2 mm either side): the common carotid at 8–24 mm, the ECA root at about 33–42 mm, and the ICA at about 61–104 mm (apart from two short air pockets). These read +10 to +190 HU instead of about −950, so they were filled when scanned. Only a dry rescan would recover them.
+- **Water in the lumen:** the common carotid at 8–24 mm, the ECA root at about 33–42 mm and the ICA at about 61–104 mm (apart from two short air pockets) read +10 to +190 HU instead of about −950, so they held water when scanned. The fully filled parts are measured from the water/wall edge: the common carotid at 11.5–21.5 mm and the ICA at 64–83.5 and 98.5–101 mm (67 stations, 33.5 mm). Still lost are the 2 mm either side of each water surface, and the ECA root, where the lumen is too small (about 2 mm) for the water/wall edge to be resolved.
 - **The print extends past the design** (`no design section`): the ICA beyond 146 mm, the ECA beyond 68 mm (where the lumen widens to 5.5 mm, an outlet connector) and the OPTH before 27 mm. There is nothing in the design to compare against there.
 - **Junctions:** the ICA/ECA bifurcation and the OPTH origin.
 
@@ -30,9 +30,11 @@ The ICA and ECA cross over each other near the bifurcation. Where the drawn ECA 
 
 | Vessel | Diameter error, mean ± SD | Centerline error (rigid-body registration) | Stations (of which at junctions) |
 |---|---|---|---|
-| Torso (Aorta 0–60 mm excluded: water) | −0.49 ± 0.20 mm (−8.0%) | 0.51 mm | 467 (69) |
-| Cranial | −0.46 ± 0.14 mm (−15.4%) | 0.57 mm | 183 (41) |
+| Torso (Aorta 0–60 mm excluded: water) | −0.49 ± 0.20 mm (−8.1%) | 0.48 mm | 456 (58) |
+| Cranial | −0.44 ± 0.14 mm (−14.3%) | 0.61 mm | 239 (37) |
 | Femoral | −0.09 ± 0.28 mm (−0.9%) | 1.38 mm | 226 (3) |
+
+In the Cranial, 67 of the 239 stations are water-filled. They read −0.39 ± 0.14 mm, against −0.46 ± 0.13 mm for the 172 air-filled stations.
 
 Per branch in the Femoral: descending aorta −0.24 ± 0.17 mm (0.45 mm), left iliac 0.00 ± 0.28 mm (0.38 mm), right iliac +0.01 ± 0.32 mm (4.37 mm). The right iliac's large centerline error is the elastic vessel lying bent relative to the design; its diameter is unaffected.
 

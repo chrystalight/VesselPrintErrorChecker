@@ -15,6 +15,7 @@ import vtk
 from vtk.util.numpy_support import vtk_to_numpy
 from scipy.ndimage import map_coordinates, gaussian_filter1d, binary_dilation, binary_closing, label
 from scipy.spatial import cKDTree
+from scipy.special import ndtr
 from scipy.spatial.transform import Rotation
 
 DEFAULTS = dict(
@@ -38,6 +39,10 @@ WALL_RUN = 0.7       # mm of continuous wall needed to end a ray when an insert 
 MAX_INSERT_RAYS = 0.6  # sections where more of the wall than this is only seen through insert contact are excluded
 MAX_SHIFT_MM = 3.0   # a measured centre may move at most max(this, 0.75 x lumen radius) from the drawn centerline
 PASSES = 3
+SOLID_HU = -450      # anything above this is solid or fluid rather than air
+FLUID_AVG_MM = 1.0   # fluid-filled sections: profiles are averaged this far either side along the vessel
+FLUID_MIN_CONTRAST = 60   # HU the wall must stand above the fluid in the lumen
+FLUID_MIN_RADIUS = 3.0    # in blur widths: a smaller lumen never shows the fluid's own level, so its edge cannot be fitted
 SMOOTH_MM = 1.5
 
 
@@ -275,6 +280,114 @@ def fill_rays_circle(rad):
     out = rad.copy(); out[~ok] = (pr + np.sqrt(disc))[~ok]; return out
 
 
+# ----------------------------------------------------------------------------- fluid-filled lumen
+def _halfmax_shift_table():
+    """For a wall of thickness w blurred by a Gaussian of width sigma with air on both sides, the half-maximum edge
+    sits slightly inside the true inner edge. Returns q = w / sigma and that offset in units of sigma (<= 0)."""
+    q = np.linspace(0.3, 8, 78); lo, hi = np.full_like(q, -4.0), np.zeros_like(q); target = ndtr(q / 2) - 0.5
+    for _ in range(40):
+        mid = (lo + hi) / 2; below = ndtr(mid) - ndtr(mid - q) < target
+        lo, hi = np.where(below, mid, lo), np.where(below, hi, mid)
+    return q, (lo + hi) / 2
+
+
+HALFMAX_Q, HALFMAX_SHIFT = _halfmax_shift_table()
+
+
+def fluid_centre(ct, c, u, v, r_max=8.0, px=0.1):
+    """Centre of the solid-or-fluid region (vessel wall plus filled lumen) that contains c, in the plane (u, v)."""
+    g = np.arange(-r_max, r_max + px, px); A, B = np.meshgrid(g, g, indexing="ij")
+    f = ct.sample(c + A[..., None] * u + B[..., None] * v)
+    lab, _ = label(f > SOLID_HU); k = lab[len(g) // 2, len(g) // 2]
+    if k == 0: return None
+    m = lab == k
+    if m[0].any() or m[-1].any() or m[:, 0].any() or m[:, -1].any(): return None     # joined to something bigger
+    return c + A[m].mean() * u + B[m].mean() * v
+
+
+def lumen_section_fluid(ct, c, t, u, v, r_max=8.0):
+    """Lumen contour where the lumen holds fluid (e.g. water left in after flushing) instead of air.
+    Fluid and wall differ by only about 100 HU, so a half-maximum on single rays is not usable. Instead:
+      1. profiles are averaged over +-FLUID_AVG_MM along the vessel;
+      2. the outer wall edge (wall to outside air, a large step) is found on every ray;
+      3. all rays, aligned at that edge, give one low-noise profile, fitted with a blurred wall model
+         (fluid level, wall level, wall thickness, blur width);
+      4. with those levels fixed, each ray is fitted for its inner and outer edge; the wall thickness is smoothed
+         around the circumference and subtracted from the outer edge;
+      5. the edge is moved to where the half-maximum would lie if the lumen held air, so fluid-filled and
+         air-filled stations are measured by the same convention.
+    Returns (radii, info), radii being NaN where a ray has no clean outer edge, or None if this is not a
+    fluid-filled lumen."""
+    import warnings
+    from scipy.optimize import least_squares
+    r = np.arange(0, r_max, DR); dirs = np.cos(ANG)[:, None] * u + np.sin(ANG)[:, None] * v
+    f = np.mean([ct.sample(c + dz * t + r[None, :, None] * dirs[:, None, :])
+                 for dz in np.arange(-FLUID_AVG_MM, FLUID_AVG_MM + 1e-6, 0.25)], 0)
+    if not f[0, 0] > SOLID_HU: return None
+    ro = np.full(N_RAYS, np.nan); Lout = np.full(N_RAYS, np.nan); n1, n2 = int(1.0 / DR), int(2.0 / DR)
+    for k in range(N_RAYS):
+        fk = f[k]; below = np.nonzero(~(fk >= SOLID_HU))[0]
+        if not len(below) or below[0] == 0: continue
+        j = below[0]; tail = fk[j + n1:j + n2]
+        if not np.isfinite(fk[j]) or len(tail) < 5 or not np.isfinite(tail).all() or tail.max() > -600: continue
+        ro[k] = r[j - 1] + DR * (fk[j - 1] - SOLID_HU) / (fk[j - 1] - fk[j]); Lout[k] = np.median(tail)
+    med = nan_median_filter(ro, 7, wrap=True)
+    ro[np.abs(ro - med) > np.maximum(0.5, 0.15 * med)] = np.nan
+    ok = np.isfinite(ro)
+    if ok.mean() < 1 - MAX_BAD_RAYS: return None
+    x = np.arange(-4.0, 1.5, DR)                                       # distance from the outer edge
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        g = np.nanmedian([np.interp(ro[k] + x, r, f[k], left=np.nan) for k in np.nonzero(ok)[0]], 0)
+    Lo = float(np.median(Lout[ok])); m = np.isfinite(g) & (x > -np.median(ro[ok]) + 0.3)
+    if m.sum() < 30: return None
+    Lw0 = float(np.median(g[m][:6]))
+
+    def model(q):
+        Lw, W, w, sg, x0 = q; z = x[m] - x0
+        return Lw + (W - Lw) * ndtr((z + w) / sg) - (W - Lo) * ndtr(z / sg) - g[m]
+    lo_b, hi_b = np.array([-1100, -300, 0.2, 0.2, -0.5]), np.array([800, 2500, 3.5, 0.9, 0.5])
+    q0 = np.clip([Lw0, max(Lw0 + 130, 200), 1.1, 0.4, 0.0], lo_b + 1e-3, hi_b - 1e-3)
+    Lw, W, w, sg, x0 = least_squares(model, q0, bounds=(lo_b, hi_b)).x
+    # a fluid-filled lumen: inside is much nearer the wall level than the outside air, yet darker than the wall
+    if W - Lw < FLUID_MIN_CONTRAST or Lw < Lo + 0.8 * (W - Lo) or not 0.3 <= w <= 3.0: return None
+    A = W - Lw; Bk = np.where(ok, W - Lout, 0.0); rq = np.where(ok, ro + x0, 1.0); ri = np.clip(rq - w, 0.2, None)
+    mask = ok[:, None] & (r[None] < (rq + 1.2)[:, None]) & np.isfinite(f); f0 = np.where(mask, f, 0.0)
+    pdf = lambda z: np.exp(-0.5 * z * z) / np.sqrt(2 * np.pi)
+    for _ in range(15):                                                # damped Gauss-Newton on (inner, outer) per ray
+        zi, zo = (r[None] - ri[:, None]) / sg, (r[None] - rq[:, None]) / sg
+        res = np.where(mask, Lw + A * ndtr(zi) - Bk[:, None] * ndtr(zo) - f0, 0.0)
+        Ji = np.where(mask, -A * pdf(zi) / sg, 0.0); Jo = np.where(mask, Bk[:, None] * pdf(zo) / sg, 0.0)
+        a, b, d = (Ji * Ji).sum(1), (Ji * Jo).sum(1), (Jo * Jo).sum(1); gi, go = (Ji * res).sum(1), (Jo * res).sum(1)
+        a = a * 1.05 + 1e-6; d = d * 1.05 + 1e-6; det = a * d - b * b
+        ri = np.clip(ri + np.clip(-(d * gi - b * go) / det, -0.2, 0.2), 0.1, r_max)
+        rq = np.clip(rq + np.clip(-(a * go - b * gi) / det, -0.2, 0.2), 0.3, r_max)
+    wk = nan_median_filter(np.where(ok, rq - ri, np.nan), 15, wrap=True)
+    rad = rq - wk + sg * np.interp(wk / sg, HALFMAX_Q, HALFMAX_SHIFT)
+    rad[~ok | ~(rad > 0.2)] = np.nan
+    if not np.nanmedian(rad) >= FLUID_MIN_RADIUS * sg: return None
+    inner = (r[None] < (rad - 0.4)[:, None]) & np.isfinite(f)          # air inside: the lumen is only partly filled
+    if inner.any() and np.mean(f[inner] < Lw - 200) > 0.05: return None
+    return rad, dict(level=float(Lw), contrast=float(W - Lw), sigma=float(sg), wall=float(w))
+
+
+def measure_fluid_station(ct, c0, t, u, v, lim):
+    """Fluid-filled station: centre on the wall-plus-lumen region, measure, re-centre on the lumen, measure again.
+    Returns (centre used for the rays, radii, info) or None."""
+    c = fluid_centre(ct, c0, u, v)
+    if c is None or np.linalg.norm(c - c0) > lim: return None
+    for _ in range(2):
+        m = lumen_section_fluid(ct, c, t, u, v)
+        if m is None: return None
+        rad, info = m; rf = fill_rays(rad)
+        if rf is None: return None
+        _, cen = polygon(np.c_[rf * np.cos(ANG), rf * np.sin(ANG)]); c2 = c + cen[0] * u + cen[1] * v
+        if np.linalg.norm(c2 - c0) > lim: return None
+        if np.linalg.norm(c2 - c) < 0.05: break
+        c = c2
+    return c, rad, info
+
+
 def measure_print_path(ct, P0, step, r_search, max_diameter=None):
     """Iteratively re-centred cross-sections along one centerline.
     Ray length: max_diameter/2 + 1 mm if a caliper diameter is given; otherwise r_search on the first pass and
@@ -313,7 +426,19 @@ def measure_print_path(ct, P0, step, r_search, max_diameter=None):
             Rl[~np.isfinite(Rl)] = np.nanmedian(D / 2)
             rmax = np.minimum(r_search, Rl + 2.5)
             lim = np.maximum(MAX_SHIFT_MM, 0.75 * Rl)
-    return dict(s=s, C=C, T=tangents(C, step), D=D, bad=bad, insert=insert, rings=rings, lost=lost, valid=valid)
+    # Stations with no air lumen near the path may hold fluid instead: measure those from the fluid/wall edge.
+    fluid = np.zeros(n, bool); fluid_info = [None] * n
+    if ct.rim is None and lost.any():
+        T = tangents(C, step); U, V = frames(T)
+        found = {i: measure_fluid_station(ct, C0[i], T[i], U[i], V[i], lim[i]) for i in np.nonzero(lost)[0]}
+        for i, m in found.items():
+            if m is None: continue
+            c, rad, q = m; rf = fill_rays(rad); fluid_info[i] = q
+            xy = np.c_[rf * np.cos(ANG), rf * np.sin(ANG)]; A, cen = polygon(xy)
+            C[i] = c + cen[0] * U[i] + cen[1] * V[i]; D[i] = 2 * np.sqrt(A / np.pi)
+            rings[i] = c + xy[:, :1] * U[i] + xy[:, 1:] * V[i]; valid[i] = np.isfinite(rad)
+            bad[i] = np.mean(~np.isfinite(rad)); lost[i] = False; fluid[i] = True
+    return dict(s=s, C=C, T=tangents(C, step), D=D, bad=bad, insert=insert, rings=rings, lost=lost, valid=valid, fluid=fluid, fluid_info=fluid_info)
 
 
 # ----------------------------------------------------------------------------- design (original) sections
@@ -443,6 +568,8 @@ def run(ct, centerlines, design_poly, params=None, progress=None):
         nolum = np.isin(flag, ["open", "no lumen near path"]); k = int(p["junction_margin_mm"] / step)
         edge = (np.convolve(nolum, np.ones(2 * k + 1), "same") > 0) & (flag == "")
         flag[edge] = "next to unmeasurable section"
+        fl = np.convolve(r["fluid"], np.ones(2 * k + 1), "same"); n_meas = np.convolve(np.isfinite(r["D"]) & ~nolum, np.ones(2 * k + 1), "same")
+        flag[(fl > 0) & (fl < n_meas) & (flag == "")] = "next to fluid surface"
         flag[(r["s"] < p["end_trim_mm"]) | (r["s"] > r["s"][-1] - p["end_trim_mm"])] = "end"
         for lo, hi in (p.get("exclude_mm") or {}).get(name, []):     # user-chosen ranges, e.g. a water-filled stretch
             flag[(r["s"] >= lo) & (r["s"] <= hi)] = "user excluded"
@@ -494,7 +621,9 @@ def run(ct, centerlines, design_poly, params=None, progress=None):
             d, j = cKDTree(o["C"]).query(r["C"])
             from_end = np.minimum(r["s"], r["s"][-1] - r["s"])
             inside |= (d < Ro[j]) & (from_end <= Ro[j] + 2.0)
-        r["jcand"] = (r["junc"] & ~inside & ~r["lost"] & (r["valid"].mean(1) >= 0.4)
+        k = int(p["junction_margin_mm"] / step)        # not next to a filled or partly filled stretch
+        wet = np.convolve(r["lost"] | r["fluid"], np.ones(2 * k + 1), "same") > 0
+        r["jcand"] = (r["junc"] & ~inside & ~wet & (r["valid"].mean(1) >= 0.4)
                       & np.isin(r["flag"], ["junction", "open", "next to unmeasurable section"]))
 
     say(0.6, "Registering print to design")
@@ -540,8 +669,10 @@ def run(ct, centerlines, design_poly, params=None, progress=None):
         Dprint, Dref, at_j = r["D"].copy(), Do.copy(), np.zeros(len(Cp), bool)
         if ok.sum() >= 2:
             Dint = np.interp(np.arange(len(Cp)), np.nonzero(ok)[0], Do[ok])
+            dev_int = np.interp(np.arange(len(Cp)), np.nonzero(ok)[0], dev[ok])
             for i in np.nonzero(r["jcand"] & ~ok)[0]:
                 if wall[i] is None or wall[i][1] > p["mismatch_mm"] or wall[i][2] > 0.25: continue   # poor fit: skip
+                if abs(wall[i][1] - dev_int[i]) > 0.5: continue    # centre jumps away from its neighbours: wrong match
                 Dref[i] = Dint[i]; Dprint[i] = Dint[i] + 2 * wall[i][0]; dev[i] = wall[i][1]
                 at_j[i] = True; ok[i] = True
         for i in range(len(Cp)):
@@ -551,10 +682,10 @@ def run(ct, centerlines, design_poly, params=None, progress=None):
                                  D_print_mm=float(Dprint[i]), D_design_mm=float(Dref[i]), dD_mm=float(Dprint[i] - Dref[i]),
                                  dD_pct=float(100 * (Dprint[i] - Dref[i]) / Dref[i]) if Dref[i] > 0 else np.nan,
                                  cl_dev_mm=float(dev[i]),
-                                 insert_hidden_frac=float(r["insert"][i]),
+                                 insert_hidden_frac=float(r["insert"][i]), fluid_filled=int(r["fluid"][i]),
                                  x=float(r["C"][i, 0]), y=float(r["C"][i, 1]), z=float(r["C"][i, 2])))
         paths[name] = dict(s=r["s"], C=r["C"], T=r["T"], rings=r["rings"], ok=ok, valid=r["valid"], at_junction=at_j,
-                           D=r["D"], wall=wall, Co=Co, Do=Dref,
+                           D=r["D"], wall=wall, Co=Co, Do=Dref, fluid=r["fluid"], fluid_info=r["fluid_info"],
                            design_loops_in_ct=[None if L is None else (L - t) @ R for L in loops])
     say(1.0, "Done")
     return dict(stations=stations, paths=paths, R=R, t=t, registration=reg)
@@ -592,6 +723,22 @@ def lumen_surface(ct, res):
     good = np.isfinite(out).all(1) & (nrm[:, 0] > 0)
     W = float(np.nanmedian(ct.sample((rings.reshape(-1, 3) + 0.7 * out / nrm)[good]))) if good.sum() > 50 else L + 800
     thr = (L + W) / 2
+    # Fluid-filled stations have no air to segment: draw their measured contours into the volume instead.
+    for p in res["paths"].values():
+        for i in np.nonzero(p["fluid"] & np.isfinite(p["rings"][:, 0, 0]))[0]:
+            c, t = p["C"][i], p["T"][i]; q = p["rings"][i] - c; rr = np.linalg.norm(q, axis=1)
+            u = q[0] - (q[0] @ t) * t; u /= np.linalg.norm(u); v = np.cross(t, u)
+            a0 = (np.round(c @ ct.M[:3, :3].T + ct.M[:3, 3]).astype(int) - lo); h = int(np.ceil((rr.max() + 1.0) / sp))
+            b0, b1 = np.maximum(a0 - h, 0), np.minimum(a0 + h + 1, np.array(sub.shape)[::-1])
+            if (b1 <= b0).any(): continue
+            I, J, K = np.meshgrid(*[np.arange(b0[d], b1[d]) for d in range(3)], indexing="ij")
+            X = (np.stack([I, J, K], -1) + lo) @ Minv[:3, :3].T + Minv[:3, 3] - c
+            ang = np.arctan2(X @ v, X @ u); ring_ang = np.arctan2(q @ v, q @ u); o = np.argsort(ring_ang)
+            edge = np.interp(ang, np.r_[ring_ang[o] - 2 * np.pi, ring_ang[o], ring_ang[o] + 2 * np.pi], np.tile(rr[o], 3))
+            val = np.clip(thr + (np.hypot(X @ u, X @ v) - edge) * 800.0, L, None)
+            slab = np.abs(X @ t) <= 0.3
+            blk = sub[b0[2]:b1[2], b0[1]:b1[1], b0[0]:b1[0]].transpose(2, 1, 0)    # a view of sub, indexed [i, j, k]
+            blk[slab] = np.minimum(blk[slab], val[slab])
     air = sub < thr; kji = np.argwhere(air)
     X = (kji[:, ::-1] + lo) @ Minv[:3, :3].T + Minv[:3, 3]
     d, j = cKDTree(C).query(X); keep = d < Rl[j] + 1.0

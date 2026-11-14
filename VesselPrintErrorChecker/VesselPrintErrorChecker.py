@@ -281,7 +281,7 @@ class VesselPrintErrorCheckerWidget(ScriptedLoadableModuleWidget):
                                 editable=self.editCheck.checked)
         self.logic.updatePlots(name, int(value))
         f = lambda x, fmt: "–" if x is None or not np.isfinite(x) else format(x, fmt)
-        tag = (st['excluded'] or 'included') + (", at a junction" if st.get('at_junction') else "") + (", edited" if st.get('edited') else "")
+        tag = (st['excluded'] or 'included') + (", at a junction" if st.get('at_junction') else "") + (", fluid-filled" if st.get('fluid_filled') else "") + (", edited" if st.get('edited') else "")
         self.info.text = (f"<b>{name}</b>, s = {st['s_mm']:.1f} mm &nbsp; ({tag})<br>"
                           f"Diameter: printed {f(st['D_print_mm'], '.2f')} mm, design {f(st['D_design_mm'], '.2f')} mm, "
                           f"error {f(st['dD_mm'], '+.2f')} mm ({f(st['dD_pct'], '+.1f')}%)<br>"

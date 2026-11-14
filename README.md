@@ -107,7 +107,7 @@ To leave out a stretch you know is unreliable, such as a section that held water
   - **Colour printed lumen by:** choose *Diameter error* (blue = narrower than designed, red = wider), *Centerline error*, or *None*. A colour legend appears in the 3D view.
   - **Colour scale limit:** sets the end of the colour scale. Diameter error runs from −limit to +limit; centerline error runs from 0 to the limit.
   - **Centre 3D view on the inspected station:** keeps the 3D camera on the station you are inspecting, without changing your zoom or angle.
-  - The surface is coloured from the nearest included station. Parts with nothing to compare against are grey. Stretches with no air in the lumen are missing from the surface.
+  - The surface is coloured from the nearest included station. Parts with nothing to compare against are grey. Fluid-filled stretches that were measured are drawn from their measured contours; stretches that could not be measured are missing from the surface.
   - The original design model is hidden in 3D because it sits in its own coordinate frame, away from the CT. The registered copy is called *VPE design (registered to CT)*.
 
 | Column (per-station table) | Meaning |
@@ -120,6 +120,7 @@ To leave out a stretch you know is unreliable, such as a section that held water
 | `at_junction` | 1 if the station is at a junction and its diameter error comes from the wall offset (see Method) |
 | `edited` | 1 if the station was changed by hand |
 | `insert_hidden_frac` | fraction of the wall seen only where an insert touches it |
+| `fluid_filled` | 1 if the lumen held fluid there and was measured from the fluid/wall edge (see Method) |
 | `excluded` | empty if the station is included, otherwise the reason (see below) |
 | `x, y, z` | printed centerline point (CT world coordinates) |
 
@@ -131,14 +132,23 @@ To leave out a stretch you know is unreliable, such as a section that held water
 5. **Design sections:** each printed station is mapped into the design with that one registration, and the design is sectioned normal to its own centerline there (nearest lumen loop, re-centred over 3 passes).
 6. **Errors:** diameter error is printed minus design equivalent diameter. Centerline error is the distance from the printed centre to the design centerline under the rigid-body registration.
 7. **Wall-offset check:** each station's printed wall points are also compared with the design surface directly, fitting *signed distance = radius error + sideways shift · normal*. Twice the radius error is a second, independent estimate of the diameter error. Ordinary stations where the two estimates differ by more than 0.3 mm are excluded as `design mismatch` (they were matched to the wrong place in the design). On the SIMONE data the two agree to within 0.02 ± 0.04 mm.
-8. **Junctions:** where a branch passes a side branch's opening, the cross-section is open, so an equivalent diameter is not defined. There the diameter error is taken as twice the radius error from the wall-offset fit, using the part of the wall that is present (at least 40% of it, with no gap over 200°), and the centerline error is the fitted shift. A branch's first or last stations that still lie inside its parent are not used; that wall is measured in the parent.
-9. **Exclusions:** each excluded station gets one of these reasons in the `excluded` column.
+8. **Junctions:** where a branch passes a side branch's opening, the cross-section is open, so an equivalent diameter is not defined. There the diameter error is taken as twice the radius error from the wall-offset fit, using the part of the wall that is present (at least 40% of it, with no gap over 200°), and the centerline error is the fitted shift. A branch's first or last stations that still lie inside its parent are not used; that wall is measured in the parent. A junction station is also skipped if its fitted shift differs by more than 0.5 mm from the centerline error of the neighbouring ordinary stations.
+9. **Fluid-filled sections:** where the drawn centerline lies in fluid (for example water left in after flushing), there is no air in the lumen. Fluid and wall differ by only about 100 HU on these scans, against about 1100 HU between air and wall, so single-ray half-maxima are not usable. Instead:
+   - profiles are averaged over ±1 mm along the vessel;
+   - the outer wall edge (wall to outside air) is found on each ray;
+   - all rays, aligned at that edge, give one low-noise profile. A blurred-wall model is fitted to it: fluid level, wall level, wall thickness and blur width;
+   - with those levels fixed, each ray is fitted for its inner and outer edge. The wall thickness is smoothed around the circumference (median over 60°) and subtracted from the outer edge;
+   - the edge is then moved to where the half-maximum would lie if the lumen held air (a shift of about 0.04 mm for a 1.2 mm wall), so fluid-filled and air-filled stations follow the same convention.
+
+   A section is only measured this way if the wall is clear of other objects on at least 85% of rays, the wall is at least 60 HU brighter than the fluid, there is no air inside the contour, and the lumen radius is at least 3 blur widths (about 1 mm; smaller lumens never show the fluid's own level). These stations have `fluid_filled` = 1. Stations within 2 mm of a change between air and fluid are excluded as `next to fluid surface`. This mode is off when *Treat bright insert as lumen* is on.
+10. **Exclusions:** each excluded station gets one of these reasons in the `excluded` column.
 
 | Reason | Meaning |
 |---|---|
 | `open` | more than 15% of rays found no wall: an outlet, a junction, or a lumen with no visible contrast |
-| `no lumen near path` | no air-filled lumen within 3 mm (or ¾ of the lumen radius) of the drawn centerline, e.g. the lumen is filled with fluid or the path runs through the wall. The centre is never allowed to jump into a neighbouring vessel. |
+| `no lumen near path` | no lumen within 3 mm (or ¾ of the lumen radius) of the drawn centerline: the path runs through the wall, or the lumen holds fluid and could not be measured from the fluid/wall edge either (partly filled, too small, or touching another object). The centre is never allowed to jump into a neighbouring vessel. |
 | `next to unmeasurable section` | within 2 mm of an `open` or `no lumen near path` stretch; these transition sections are often partly filled |
+| `next to fluid surface` | within 2 mm of a change between air-filled and fluid-filled stations |
 | `end` | within 2 mm of a centerline end |
 | `junction` | a junction station that could not be measured from the wall offset (too little wall, or a poor fit), or a branch's first or last stations inside its parent |
 | `shared with X` | this stretch runs along the same lumen as branch X (for example, two branch paths that both start in a common trunk). It is measured once, in the branch listed first (X), so the trunk isn't counted twice. |
@@ -170,5 +180,6 @@ scripts/run_headless.py             command-line runner
 ## Known limitations
 - Lumens below about 2 mm (around 5 voxels at 0.4 mm) are measured narrow because of CT blur, so treat them as approximate.
 - Sections with an insert are less precise (about ±0.3 mm on the SIMONE iliacs) because part of the wall is inferred from the insert's surface.
-- Fluid left in a lumen during scanning can hide the wall. Fully filled sections are excluded as `open`, but partly filled sections read narrow, because the contour follows the air–fluid surface instead of the wall. In the inspect view the contour then has a flat side. Scan the prints dry, or use *Treat bright insert as lumen* only for solid inserts, not fluid.
+- Fluid left in a lumen during scanning: fully filled sections are measured from the fluid/wall edge (Method, step 9). That edge has about a tenth of the contrast of an air/wall edge, so single stations are noisier and lumens under about 2 mm cannot be measured this way. On the SIMONE Cranial module the fluid-filled stations read −0.39 ± 0.14 mm against −0.46 ± 0.13 mm for the air-filled ones. Partly filled sections read narrow, because the contour follows the air–fluid surface instead of the wall (in the inspect view the contour then has a flat side); exclude those with *Exclude ranges*.
+- The half-maximum edge of a thin wall sits slightly inside the true edge. For the SIMONE Cranial walls (about 1.2 mm, blur width about 0.35 mm) a wall-model fit puts the lumen about 0.1 mm wider in diameter than the half-maximum does. All stations use the half-maximum convention, so this applies to every reported diameter error equally.
 - Registration is least certain when the scanned vessels cover only part of the design, as with the SIMONE Cranial module. There the result can shift slightly (a few stations, ~0.03 mm) depending on centerline order.
