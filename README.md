@@ -94,6 +94,14 @@ Tick **Treat bright insert as lumen** under *Parameters* if something bright, su
   - the design lumen mapped into the CT (orange);
   - that station's numbers.
 
+  The view re-centres and zooms onto the contours every time you change station, even if you have panned or zoomed in the meantime.
+- **3D view:** tick **Show 3D view** under *3D view*. A 3D panel opens next to the cross-section. It shows the measured printed lumen over a translucent grey copy of the design, registered into the CT.
+  - **Colour printed lumen by:** choose *Diameter error* (blue = narrower than designed, red = wider), *Centerline error (whole-module fit)*, *Centerline error (per-vessel fit)*, or *None*. A colour legend appears in the 3D view.
+  - **Colour scale limit:** sets the end of the colour scale. Diameter error runs from −limit to +limit; centerline error runs from 0 to the limit.
+  - **Centre 3D view on the inspected station:** keeps the 3D camera on the station you are inspecting, without changing your zoom or angle.
+  - Only included stations are drawn. Gaps in the surface are excluded stations.
+  - The original design model is hidden in 3D because it sits in its own coordinate frame, away from the CT. The registered copy is called *VPE design (registered to CT)*.
+
 | Column (per-station table) | Meaning |
 |---|---|
 | `s_mm` | distance along the centerline |
@@ -143,5 +151,5 @@ scripts/run_headless.py             command-line runner
 
 ## Known limitations
 - Lumens below about 2 mm (around 5 voxels at 0.4 mm) are measured narrow because of CT blur, so treat them as approximate.
-- Fluid left in a lumen during scanning can hide the wall. Fully filled sections are excluded as `open`, but partly filled sections can read narrow.
+- Fluid left in a lumen during scanning can hide the wall. Fully filled sections are excluded as `open`, but partly filled sections read narrow, because the contour follows the air–fluid surface instead of the wall. In the inspect view the contour then has a flat side. Scan the prints dry, or use *Treat bright insert as lumen* only for solid inserts, not fluid.
 - Registration is least certain when the scanned vessels cover only part of the design, as with the SIMONE Cranial module. There the result can shift slightly (a few stations, ~0.03 mm) depending on centerline order.

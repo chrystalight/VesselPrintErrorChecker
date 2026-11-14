@@ -4,7 +4,7 @@ These are CT scans, designs and centerlines for the three printed vessel modules
 
 | Module | Material | CT (`CT/`) | Design (`design.stl`) | Centerlines (`centerlines/*.pth`) | Notes |
 |---|---|---|---|---|---|
-| Torso | elastic | 396 slices, 0.465 mm | aortic arch lumen | Aorta, Left/Right Common Carotid, Left/Right Subclavian | ~15–55 mm along *Aorta* runs through a mounting sleeve that compresses the lumen |
+| Torso | elastic | 396 slices, 0.465 mm | aortic arch lumen | Aorta, Left/Right Common Carotid, Left/Right Subclavian | water was pooled in the lower aorta during scanning, so ~15–55 mm along *Aorta* reads 1–3 mm narrow (the contour follows the water surface); treat that stretch as a scanning artefact |
 | Cranial | rigid | 508 slices, 0.362 mm | carotid lumen | ICA, ECA, OPTH | some sections held water during scanning (no lumen contrast) and are excluded; OPTH is ~1–1.5 mm, near the resolution limit |
 | Femoral | elastic | 396 slices, 0.465 mm | aorto-iliac lumen | DescendingAorta, LeftIliac, RightIliac | a tube sits in both iliacs, so use *Treat bright insert as lumen* (HU ≥ 600); the iliacs end up fully excluded because the tube covers about half the wall |
 
@@ -19,7 +19,7 @@ These are CT scans, designs and centerlines for the three printed vessel modules
 | Module | Diameter error, mean ± SD | Centerline error, whole module | Centerline error, per vessel |
 |---|---|---|---|
 | Torso (all) | −0.84 ± 0.77 mm (−11.4%) | 0.81 mm | 0.27 mm |
-| Torso, excluding the sleeve section | ≈ −0.5 mm (−8%) | | |
+| Torso, excluding the water-filled stretch (Aorta 0–60 mm) | −0.50 ± 0.21 mm (−8.1%) | | |
 | Cranial | −0.53 ± 0.24 mm (−17.8%) | 0.74 mm | 0.22 mm |
 | Femoral (descending aorta) | −0.25 ± 0.19 mm (−3.0%) | 0.51 mm | 0.17 mm |
 

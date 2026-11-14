@@ -34,6 +34,14 @@ LAYOUT_XML = """
   </layout>
  </item>
 </layout>"""
+LAYOUT_3D_ID = 50732
+LAYOUT_3D_XML = LAYOUT_XML.replace(
+    '<view class="vtkMRMLSliceNode" singletontag="Red">',
+    '<layout type="horizontal" split="true"><item><view class="vtkMRMLSliceNode" singletontag="Red">', 1).replace(
+    '    </view>\n   </item>\n   <item splitSize="300">',
+    '    </view></item><item><view class="vtkMRMLViewNode" singletontag="1"><property name="viewlabel" action="default">1</property></view></item></layout>\n   </item>\n   <item splitSize="300">', 1)
+COLOR_BY = [("None", None), ("Diameter error", "dD_mm"), ("Centerline error (whole-module fit)", "cl_dev_module_mm"),
+            ("Centerline error (per-vessel fit)", "cl_dev_vessel_mm")]
 COLORS = [(0.16, 0.47, 0.84), (0.77, 0.43, 0.11), (0.09, 0.57, 0.50), (0.42, 0.31, 0.77), (0.80, 0.25, 0.45),
           (0.45, 0.60, 0.15), (0.20, 0.65, 0.85), (0.55, 0.40, 0.25)]
 
@@ -124,6 +132,18 @@ class VesselPrintErrorCheckerWidget(ScriptedLoadableModuleWidget):
                            "<span style='color:#f59e0b'>■</span> design lumen (mapped into the CT)")
         iform.addRow(legend)
 
+        # --- 3D view
+        vbox = ctk.ctkCollapsibleButton(); vbox.text = "3D view"; self.layout.addWidget(vbox)
+        vform = qt.QFormLayout(vbox)
+        self.show3D = qt.QCheckBox("Show 3D view (printed lumen over the registered design)")
+        vform.addRow(self.show3D)
+        self.colorBy = qt.QComboBox(); self.colorBy.addItems([c[0] for c in COLOR_BY]); self.colorBy.currentIndex = 1
+        vform.addRow("Colour printed lumen by:", self.colorBy)
+        self.colorMax = self._spin(0.1, 10, 1.0, " mm", "Colour scale limit: diameter error -limit..+limit, centerline error 0..limit")
+        vform.addRow("Colour scale limit:", self.colorMax)
+        self.follow3D = qt.QCheckBox("Centre 3D view on the inspected station"); self.follow3D.checked = True
+        vform.addRow(self.follow3D)
+
         rrow = qt.QHBoxLayout()
         self.tableChoice = qt.QComboBox(); self.tableChoice.addItems(["Summary table", "Per-station table"])
         self.saveButton = qt.QPushButton("Save tables as CSV..."); self.saveButton.enabled = False
@@ -137,6 +157,9 @@ class VesselPrintErrorCheckerWidget(ScriptedLoadableModuleWidget):
         self.stationSlider.connect("valueChanged(double)", self.onStationChanged)
         self.saveButton.connect("clicked()", self.onSave)
         self.tableChoice.connect("currentIndexChanged(int)", self.onTableChoice)
+        self.show3D.connect("toggled(bool)", self.on3DOptions)
+        self.colorBy.connect("currentIndexChanged(int)", self.on3DOptions)
+        self.colorMax.connect("valueChanged(double)", self.on3DOptions)
         self._plotConnected = []
 
     def _combo(self, types, tip):
@@ -197,7 +220,9 @@ class VesselPrintErrorCheckerWidget(ScriptedLoadableModuleWidget):
                             f"All vessels: diameter error {all_['dD_mean_mm']:+.2f} ± {all_['dD_sd_mm']:.2f} mm "
                             f"({all_['dD_mean_pct']:+.1f}%), centerline error {all_['cl_module_mean_mm']:.2f} mm (module fit), "
                             f"{all_['cl_vessel_mean_mm']:.2f} mm (per-vessel fit), n = {all_['n_stations']} stations.")
-        lg.showLayout()
+        lg.showLayout(self.show3D.checked)
+        lg.build3D(); lg.fit3D()
+        lg.colour3D(COLOR_BY[self.colorBy.currentIndex][1], self.colorMax.value)
         self.connectPlots()
         self.vesselCombo.blockSignals(True); self.vesselCombo.clear()
         for name in lg.result["paths"]: self.vesselCombo.addItem(name)
@@ -233,13 +258,20 @@ class VesselPrintErrorCheckerWidget(ScriptedLoadableModuleWidget):
     def onStationChanged(self, value):
         name = self.vesselCombo.currentText
         if not name or self.logic.result is None: return
-        st = self.logic.inspect(name, int(value))
+        st = self.logic.inspect(name, int(value), follow3D=self.show3D.checked and self.follow3D.checked)
         f = lambda x, fmt: "–" if x is None or not np.isfinite(x) else format(x, fmt)
         self.info.text = (f"<b>{name}</b>, s = {st['s_mm']:.1f} mm &nbsp; ({st['excluded'] or 'included'})<br>"
                           f"Diameter: printed {f(st['D_print_mm'], '.2f')} mm, design {f(st['D_design_mm'], '.2f')} mm, "
                           f"error {f(st['dD_mm'], '+.2f')} mm ({f(st['dD_pct'], '+.1f')}%)<br>"
                           f"Centerline error: {f(st['cl_dev_module_mm'], '.2f')} mm (module fit), "
                           f"{f(st['cl_dev_vessel_mm'], '.2f')} mm (per-vessel fit)")
+
+    def on3DOptions(self, *args):
+        if self.logic.result is None: return
+        self.logic.showLayout(self.show3D.checked)
+        self.logic.colour3D(COLOR_BY[self.colorBy.currentIndex][1], self.colorMax.value)
+        self.connectPlots(); self.onTableChoice(self.tableChoice.currentIndex)
+        self.onStationChanged(self.stationSlider.value)
 
     def onTableChoice(self, idx):
         tv = slicer.mrmlScene.GetSingletonNode("VPETable", "vtkMRMLTableViewNode")
@@ -329,7 +361,8 @@ class VesselPrintErrorCheckerLogic(ScriptedLoadableModuleLogic):
             if len(P) < 2: continue
             curves[c.GetName()] = P
         self.volumeNode = volNode
-        self.result = core.run(ct, curves, self._design(modelNode), params, progress)
+        self.designPoly = self._design(modelNode); self.inputDesignNode = modelNode
+        self.result = core.run(ct, curves, self.designPoly, params, progress)
         self.summary = core.summarise(self.result["stations"], params.get("station_spacing_mm", 0.5))
         self.stationsTable = self._table("VPE stations", self.result["stations"])
         self.summaryTable = self._table("VPE summary", self.summary)
@@ -387,10 +420,14 @@ class VesselPrintErrorCheckerLogic(ScriptedLoadableModuleLogic):
                 chart.AddAndObservePlotSeriesNodeID(s.GetID()); self.seriesToPath[s.GetID()] = name
         self.chartD, self.chartC = chartD, chartC
 
-    def showLayout(self):
+    def showLayout(self, with3D=False):
         lm = slicer.app.layoutManager(); ln = lm.layoutLogic().GetLayoutNode()
         if not ln.IsLayoutDescription(LAYOUT_ID): ln.AddLayoutDescription(LAYOUT_ID, LAYOUT_XML)
-        lm.setLayout(LAYOUT_ID); slicer.app.processEvents()
+        if not ln.IsLayoutDescription(LAYOUT_3D_ID): ln.AddLayoutDescription(LAYOUT_3D_ID, LAYOUT_3D_XML)
+        target = LAYOUT_3D_ID if with3D else LAYOUT_ID
+        if lm.layout != target:
+            lm.setLayout(target); slicer.app.processEvents()
+            if with3D: self.fit3D()
         for tag, chart in [("VPEPlotDiameter", self.chartD), ("VPEPlotCenterline", self.chartC)]:
             v = slicer.mrmlScene.GetSingletonNode(tag, "vtkMRMLPlotViewNode")
             if v: v.SetPlotChartNodeID(chart.GetID())
@@ -401,21 +438,129 @@ class VesselPrintErrorCheckerLogic(ScriptedLoadableModuleLogic):
         if vd and not self.volumeNode.GetAttribute("VPE.WindowSet"):          # once per volume: air -> resin contrast
             vd.AutoWindowLevelOff(); vd.SetWindowLevel(1800, -100); self.volumeNode.SetAttribute("VPE.WindowSet", "1")
 
-    def inspect(self, name, i):
+    def inspect(self, name, i, follow3D=False):
         """Reorient the Red slice view onto station i of vessel `name` and draw both contours."""
         p = self.result["paths"][name]
         row = [s for s in self.result["stations"] if s["path"] == name][i]
         c, n = p["C"][i], p["T"][i]
         U, _ = core.frames(p["T"][max(0, i - 1):i + 1]); u = U[-1]
         sn = slicer.mrmlScene.GetNodeByID("vtkMRMLSliceNodeRed")
+        pts = [q for q in (p["rings"][i], p["design_loops_in_ct"][i]) if q is not None and np.isfinite(q).all()]
+        if pts:                                  # frame both contours: centre between them, wide enough for both
+            allp = np.vstack(pts); c = (allp.min(0) + allp.max(0)) / 2
+            c = c - np.dot(c - p["C"][i], n) * n                        # stay in the station's plane
+            r = float(np.max(np.linalg.norm(allp - c, axis=1)))
+        else:
+            r = 5.0
         if sn is not None:
             sn.SetSliceToRASByNTP(*n, *u, *c, 0)
-            ring = p["rings"][i]
-            r = np.nanmax(np.linalg.norm(ring - c, axis=1)) if np.isfinite(ring).any() else 5.0
-            fov = 2 * (r + 4.0); sn.SetFieldOfView(fov, fov, sn.GetFieldOfView()[2])
+            sn.SetXYZOrigin(0, 0, 0)             # undo any pan left over from the user, so the view is centred on c
+            fov = 2 * r + 6.0; sn.SetFieldOfView(fov, fov, sn.GetFieldOfView()[2])
+            sn.UpdateMatrices()
+        if follow3D and slicer.app.layoutManager().threeDViewCount:
+            viewNode = slicer.app.layoutManager().threeDWidget(0).mrmlViewNode()
+            cam = slicer.modules.cameras.logic().GetViewActiveCameraNode(viewNode)
+            if cam:
+                fp, pos = np.array(cam.GetFocalPoint()), np.array(cam.GetPosition())
+                cam.SetFocalPoint(*c); cam.SetPosition(*(c + pos - fp))
         self._contour("VPE printed contour", p["rings"][i] if np.isfinite(p["rings"][i]).all() else None, (0.13, 0.83, 0.93))
         self._contour("VPE design contour", p["design_loops_in_ct"][i], (0.96, 0.62, 0.04))
         return row
+
+    def build3D(self):
+        """Printed lumen surface (rings joined between consecutive included stations, in CT space) carrying the
+        per-station errors as point data, plus the design surface mapped into CT space."""
+        res = self.result; n_r = core.N_RAYS
+        keys = [k for _, k in COLOR_BY if k]
+        pts, polys, arrays, off = [], [], {k: [] for k in keys}, 0
+        for name, p in res["paths"].items():
+            rows = [s for s in res["stations"] if s["path"] == name]
+            rings = p["rings"]; good = p["ok"] & np.isfinite(rings).all(axis=(1, 2))
+            idx = np.nonzero(good)[0]
+            for k in range(len(idx) - 1):
+                if idx[k + 1] - idx[k] != 1: continue
+                a, b = off + k * n_r, off + (k + 1) * n_r
+                for j in range(n_r):
+                    j1 = (j + 1) % n_r; polys.append((a + j, a + j1, b + j1, b + j))
+            for i in idx:
+                pts.append(rings[i])
+                for key in keys: arrays[key].append(np.full(n_r, rows[i][key]))
+            off += len(idx) * n_r
+        poly = vtk.vtkPolyData()
+        if pts:
+            from vtk.util.numpy_support import numpy_to_vtk, numpy_to_vtkIdTypeArray
+            P = np.vstack(pts); vp = vtk.vtkPoints(); vp.SetData(numpy_to_vtk(P.astype(float), deep=True))
+            conn = np.hstack([np.full((len(polys), 1), 4), np.array(polys)]).ravel().astype(np.int64)
+            cells = vtk.vtkCellArray(); cells.SetCells(len(polys), numpy_to_vtkIdTypeArray(conn, deep=True))
+            poly.SetPoints(vp); poly.SetPolys(cells)
+            for key in keys:
+                arr = numpy_to_vtk(np.concatenate(arrays[key]).astype(float), deep=True); arr.SetName(key)
+                poly.GetPointData().AddArray(arr)
+            nf = vtk.vtkPolyDataNormals(); nf.SetInputData(poly); nf.SplittingOff(); nf.Update(); poly = nf.GetOutput()
+        m = self._node("vtkMRMLModelNode", "VPE printed lumen"); m.SetAndObservePolyData(poly)
+        if m.GetDisplayNode() is None: m.CreateDefaultDisplayNodes()
+        m.GetDisplayNode().SetVisibility2D(False); m.GetDisplayNode().SetBackfaceCulling(False)
+        R, t = res["R"], res["t"]; M = np.eye(4); M[:3, :3] = R.T; M[:3, 3] = -R.T @ t   # design -> CT
+        tr = vtk.vtkTransform(); tr.SetMatrix(slicer.util.vtkMatrixFromArray(M))
+        f = vtk.vtkTransformPolyDataFilter(); f.SetTransform(tr); f.SetInputData(self.designPoly); f.Update()
+        d = self._node("vtkMRMLModelNode", "VPE design (registered to CT)"); d.SetAndObservePolyData(f.GetOutput())
+        if d.GetDisplayNode() is None: d.CreateDefaultDisplayNodes()
+        dd = d.GetDisplayNode(); dd.SetColor(0.75, 0.75, 0.75); dd.SetOpacity(0.25); dd.SetVisibility2D(False)
+        self.lumenModel, self.designModel = m, d
+        # the input design sits in its own (design) frame, away from the CT; hide it in 3D so the camera frames the
+        # printed lumen and the registered copy of the design
+        idn = self.inputDesignNode.GetDisplayNode() if getattr(self, "inputDesignNode", None) else None
+        if idn: idn.SetVisibility3D(False)
+
+    def fit3D(self):
+        """Point the 3D camera at the printed lumen (not the whole CT box) and hide the box and axis labels."""
+        lm = slicer.app.layoutManager(); m = getattr(self, "lumenModel", None)
+        if not lm.threeDViewCount or m is None or m.GetPolyData() is None or m.GetPolyData().GetNumberOfPoints() == 0: return
+        w = lm.threeDWidget(0); vn = w.mrmlViewNode(); vn.SetBoxVisible(False); vn.SetAxisLabelsVisible(False)
+        ren = w.threeDView().renderWindow().GetRenderers().GetFirstRenderer()
+        ren.ResetCamera(m.GetPolyData().GetBounds()); w.threeDView().forceRender()
+
+    def _colorTable(self, kind):
+        """Blue-white-red for diameter error (signed), cream-to-dark-red for centerline error; grey = no value."""
+        name = "VPE diverging" if kind == "div" else "VPE sequential"
+        node = slicer.mrmlScene.GetFirstNodeByName(name)
+        if node is None:
+            node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLColorTableNode", name)
+            node.SetTypeToUser(); node.SetNumberOfColors(256); node.SetHideFromEditors(True)
+            stops = ([(0, (0.13, 0.30, 0.67)), (0.5, (0.97, 0.97, 0.97)), (1, (0.70, 0.09, 0.17))] if kind == "div" else
+                     [(0, (1.0, 0.97, 0.88)), (0.4, (0.99, 0.70, 0.30)), (1, (0.50, 0.0, 0.15))])
+            for k in range(256):
+                x = k / 255.0
+                for (x0, c0), (x1, c1) in zip(stops[:-1], stops[1:]):
+                    if x0 <= x <= x1:
+                        w = (x - x0) / (x1 - x0); node.SetColor(k, *[a + w * (b - a) for a, b in zip(c0, c1)], 1.0); break
+            node.GetLookupTable().SetNanColor(0.6, 0.6, 0.6, 1.0)
+        return node
+
+    def colour3D(self, key, limit):
+        m = getattr(self, "lumenModel", None)
+        if m is None: return
+        dn = m.GetDisplayNode()
+        if key is None:
+            dn.SetScalarVisibility(False); dn.SetColor(0.13, 0.83, 0.93)
+        else:
+            signed = key == "dD_mm"; ct = self._colorTable("div" if signed else "seq")
+            dn.SetActiveScalarName(key); dn.SetAndObserveColorNodeID(ct.GetID())
+            dn.SetScalarRangeFlag(dn.UseManualScalarRange); dn.SetScalarRange(-limit if signed else 0.0, limit)
+            dn.SetScalarVisibility(True)
+        try:                                     # colour legend in the 3D view, rebuilt so it follows the colouring
+            cl = slicer.modules.colors.logic()
+            old = cl.GetColorLegendDisplayNode(m)
+            if old: slicer.mrmlScene.RemoveNode(old)
+            if key is not None:
+                legend = cl.AddDefaultColorLegendDisplayNode(m)
+                legend.SetTitleText({"dD_mm": "Diameter error (mm)", "cl_dev_module_mm": "Centerline error, module fit (mm)",
+                                     "cl_dev_vessel_mm": "Centerline error, per-vessel fit (mm)"}[key])
+                legend.SetSize(0.12, 0.45); legend.SetPosition(0.98, 0.5)
+                views = slicer.util.getNodesByClass("vtkMRMLViewNode")
+                if views: legend.SetViewNodeIDs([v.GetID() for v in views])
+        except Exception:
+            pass
 
     def _contour(self, name, pts, color):
         node = self._node("vtkMRMLMarkupsClosedCurveNode", name, hidden=True)
