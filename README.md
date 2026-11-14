@@ -88,7 +88,7 @@ The centerlines must be drawn on the printed CT, not on the design. The design c
 
 Tick **Treat bright insert as lumen** under *Parameters* if something bright, such as an introducer sheath, sits inside a vessel. The insert then counts as part of the lumen: where it lies against the wall, its own outer surface is taken as the lumen edge. Stations where more than 60% of the wall is only seen through insert contact are excluded.
 
-To leave out a stretch you know is unreliable, such as a section that held water during scanning, fill in **Exclude ranges (mm)**. Give distances along the centerline, for example `Aorta: 0-60; ICA: 5-12`; several ranges per vessel are separated by commas. Excluded stretches are left out of the results and also out of the registration. They show as `user excluded` in the per-station table. The SIMONE Torso sample fills this in for you (`Aorta: 0-60`, where water pooled in the lower aorta).
+To leave out a stretch you know is unreliable, such as a section that held water during scanning, fill in **Exclude ranges (mm)**. Give distances along the centerline, for example `Aorta: 0-60; ICA: 5-12`; several ranges per vessel are separated by commas. Excluded stretches are left out of the results and also out of the registration. They show as `user excluded` in the per-station table. The SIMONE Torso sample fills this in for you (`Aorta: 0-60`, where water pooled in the lower aorta). To leave a whole branch out of the results, write `all` instead of a range, for example `LeftIliac: all; RightIliac: all`. That branch is still measured and still used to align the print with the design (a single straight vessel on its own cannot be aligned reliably), but none of its stations are reported; they show as `branch not reported`. The SIMONE Femoral sample fills this in for both iliacs, where the introducer sheaths are too bright for a reliable lumen edge.
 
 ## Outputs
 - **Summary table** (each branch, plus `ALL` for the whole vessel) and **per-station table**. Switch between them with the drop-down, and export everything with **Export CSV...** (see *Exported files* below).
@@ -194,6 +194,7 @@ The bias is the mean of `diff_mm` and the limits of agreement are mean ± 1.96 S
 | `design artefact` | the design section jumps away from its local trend, as at a capped outlet or a branch ostium |
 | `below CT resolution` | the design diameter is under the *Min design diameter* setting (0 = off) |
 | `user excluded` | inside a range given in *Exclude ranges (mm)* |
+| `branch not reported` | the whole branch was given as `all` in *Exclude ranges (mm)*: used for the registration only |
 
 All parameters are under *Parameters* in the module, with tooltips.
 
@@ -215,7 +216,7 @@ scripts/run_headless.py             command-line runner
 
 ## Known limitations
 - Lumens below about 2 mm (around 5 voxels at 0.4 mm) are measured narrow because of CT blur, so treat them as approximate.
-- Sections with an insert are less precise (about ±0.3 mm on the SIMONE iliacs) because part of the wall is inferred from the insert's surface.
+- Sections with an insert are less precise (about ±0.3 mm on the SIMONE iliacs) because part of the wall is inferred from the insert's surface. The SIMONE Femoral sample therefore leaves both iliacs out of the results by default.
 - Fluid left in a lumen during scanning: fully filled sections are measured from the fluid/wall edge (Method, step 9). That edge has about a tenth of the contrast of an air/wall edge, so single stations are noisier and lumens under about 2 mm cannot be measured this way. On the SIMONE Cranial module the fluid-filled stations read −0.39 ± 0.14 mm against −0.46 ± 0.13 mm for the air-filled ones. Partly filled sections read narrow, because the contour follows the air–fluid surface instead of the wall (in the inspect view the contour then has a flat side); exclude those with *Exclude ranges*.
 - The half-maximum edge of a thin wall sits slightly inside the true edge. For the SIMONE Cranial walls (about 1.2 mm, blur width about 0.35 mm) a wall-model fit puts the lumen about 0.1 mm wider in diameter than the half-maximum does. All stations use the half-maximum convention, so this applies to every reported diameter error equally.
 - Registration is least certain when the scanned vessels cover only part of the design, as with the SIMONE Cranial module. There the result can shift slightly (a few stations, ~0.03 mm) depending on centerline order.

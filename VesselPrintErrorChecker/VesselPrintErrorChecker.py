@@ -93,9 +93,10 @@ class VesselPrintErrorCheckerWidget(ScriptedLoadableModuleWidget):
         self.unitsSpin.setToolTip("mm per SimVascular unit (10 if SimVascular worked in cm)")
         row.addWidget(self.importButton); row.addWidget(qt.QLabel("mm per unit:")); row.addWidget(self.unitsSpin)
         form.addRow(row)
-        self.excludeEdit = qt.QLineEdit(); self.excludeEdit.placeholderText = "optional, e.g.  Aorta: 0-60; ICA: 5-12"
+        self.excludeEdit = qt.QLineEdit(); self.excludeEdit.placeholderText = "optional, e.g.  Aorta: 0-60; ICA: 5-12; OPTH: all"
         self.excludeEdit.setToolTip("Stretches of a vessel to leave out, in mm along its centerline (e.g. a section that held "
-                                    "water during scanning). Format: Branch: from-to, from-to; Branch2: from-to")
+                                    "water during scanning). Format: Branch: from-to, from-to; Branch2: from-to. Write 'Branch: all' to leave a "
+                                    "whole branch out of the results; it is still used to align the print with the design.")
         form.addRow("Exclude ranges (mm):", self.excludeEdit)
 
         # --- parameters

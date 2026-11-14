@@ -571,7 +571,8 @@ def run(ct, centerlines, design_poly, params=None, progress=None):
         fl = np.convolve(r["fluid"], np.ones(2 * k + 1), "same"); n_meas = np.convolve(np.isfinite(r["D"]) & ~nolum, np.ones(2 * k + 1), "same")
         flag[(fl > 0) & (fl < n_meas) & (flag == "")] = "next to fluid surface"
         flag[(r["s"] < p["end_trim_mm"]) | (r["s"] > r["s"][-1] - p["end_trim_mm"])] = "end"
-        for lo, hi in (p.get("exclude_mm") or {}).get(name, []):     # user-chosen ranges, e.g. a water-filled stretch
+        rng = (p.get("exclude_mm") or {}).get(name, [])
+        for lo, hi in ([] if rng == "all" else rng):                 # user-chosen ranges, e.g. a water-filled stretch
             flag[(r["s"] >= lo) & (r["s"] <= hi)] = "user excluded"
         # Another branch's centerline passing through this cross-section means either
         #  - a shared segment: both centerlines run along the same lumen for a while (e.g. ICA and ECA paths both
@@ -675,8 +676,12 @@ def run(ct, centerlines, design_poly, params=None, progress=None):
                 if abs(wall[i][1] - dev_int[i]) > 0.5: continue    # centre jumps away from its neighbours: wrong match
                 Dref[i] = Dint[i]; Dprint[i] = Dint[i] + 2 * wall[i][0]; dev[i] = wall[i][1]
                 at_j[i] = True; ok[i] = True
+        # A whole branch given as "all" is still measured and used for the registration (it helps pin down the
+        # alignment), but none of its stations are reported.
+        omit = (p.get("exclude_mm") or {}).get(name) == "all"
+        if omit: ok = np.zeros(len(Cp), bool)
         for i in range(len(Cp)):
-            why = "" if at_j[i] else (r["flag"][i] or ("no design section" if not np.isfinite(Do[i]) else "design mismatch" if mismatch[i]
+            why = "branch not reported" if omit else "" if at_j[i] else (r["flag"][i] or ("no design section" if not np.isfinite(Do[i]) else "design mismatch" if mismatch[i]
                                       else "below CT resolution" if small[i] else "design artefact" if artefact[i] else ""))
             stations.append(dict(branch=name, station=i, s_mm=float(r["s"][i]), excluded=why, at_junction=int(at_j[i]), edited=0,
                                  D_print_mm=float(Dprint[i]), D_design_mm=float(Dref[i]), dD_mm=float(Dprint[i] - Dref[i]),
@@ -803,7 +808,7 @@ def summarise(stations, step):
 
 
 def parse_exclude(text):
-    """'Aorta: 0-60, 100-110; ICA: 5-12'  ->  {'Aorta': [[0, 60], [100, 110]], 'ICA': [[5, 12]]}"""
+    """'Aorta: 0-60, 100-110; ICA: 5-12; OPTH: all'  ->  {'Aorta': [[0, 60], [100, 110]], 'ICA': [[5, 12]], 'OPTH': 'all'}"""
     out = {}
     for part in (text or "").split(";"):
         if ":" not in part: continue
@@ -812,11 +817,12 @@ def parse_exclude(text):
             if "-" not in rg: continue
             lo, hi = rg.strip().split("-", 1)
             out.setdefault(name.strip(), []).append([float(lo), float(hi)])
+        if ranges.strip().lower() == "all": out[name.strip()] = "all"
     return out
 
 
 def format_exclude(d):
-    return "; ".join(f"{k}: " + ", ".join(f"{lo:g}-{hi:g}" for lo, hi in v) for k, v in (d or {}).items())
+    return "; ".join(f"{k}: " + ("all" if v == "all" else ", ".join(f"{lo:g}-{hi:g}" for lo, hi in v)) for k, v in (d or {}).items())
 
 
 def read_pth(path, scale=10.0, lps_to_ras=True):

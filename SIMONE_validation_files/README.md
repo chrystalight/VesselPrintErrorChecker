@@ -6,7 +6,7 @@ These are CT scans, designs and centerlines for the three printed vessel modules
 |---|---|---|---|---|---|
 | Torso | elastic | 396 slices, 0.465 mm | aortic arch lumen | Aorta, Left/Right Common Carotid, Left/Right Subclavian | water was pooled in the lower aorta during scanning, so ~15–55 mm along *Aorta* reads 1–3 mm narrow (the contour follows the water surface); this stretch is excluded by default (`exclude_mm` in `samples.json`, shown in the module's *Exclude ranges* field) |
 | Cranial | rigid | 508 slices, 0.362 mm | carotid lumen | ICA, ECA, OPTH | parts of the lumen held water during scanning; fully filled stretches are measured from the water/wall edge (`fluid_filled` = 1); OPTH is ~1–1.5 mm, near the resolution limit |
-| Femoral | elastic | 396 slices, 0.465 mm | aorto-iliac lumen | DescendingAorta, LeftIliac, RightIliac | an introducer sheath lies in each iliac, so *Treat bright insert as lumen* (HU ≥ 600) is on; the iliacs are measured with the sheath counted as lumen and are noisier (±0.3 mm) than the aorta |
+| Femoral | elastic | 396 slices, 0.465 mm | aorto-iliac lumen | DescendingAorta, LeftIliac, RightIliac | an introducer sheath lies in each iliac and is too bright for a reliable lumen edge, so both iliacs are left out of the results by default (`LeftIliac: all; RightIliac: all` in *Exclude ranges*). They are still measured, with *Treat bright insert as lumen* (HU ≥ 600) on, because the registration needs them |
 
 ## What's in the files
 - **CT:** Siemens cone-beam CT (DynaCT), 109 kVp, 512 × 512, in HU. Each module was scanned separately; the simulator was moved between scans but not rotated.
@@ -32,10 +32,10 @@ The ICA and ECA cross over each other near the bifurcation. Where the drawn ECA 
 |---|---|---|---|
 | Torso (Aorta 0–60 mm excluded: water) | −0.49 ± 0.20 mm (−8.1%) | 0.48 mm | 456 (58) |
 | Cranial | −0.44 ± 0.14 mm (−14.3%) | 0.61 mm | 239 (37) |
-| Femoral | −0.09 ± 0.28 mm (−0.9%) | 1.38 mm | 226 (3) |
+| Femoral (descending aorta only; iliacs not reported) | −0.24 ± 0.17 mm (−2.8%) | 0.45 mm | 87 (0) |
 
 In the Cranial, 67 of the 239 stations are water-filled. They read −0.39 ± 0.14 mm, against −0.46 ± 0.13 mm for the 172 air-filled stations.
 
-Per branch in the Femoral: descending aorta −0.24 ± 0.17 mm (0.45 mm), left iliac 0.00 ± 0.28 mm (0.38 mm), right iliac +0.01 ± 0.32 mm (4.37 mm). The right iliac's large centerline error is the elastic vessel lying bent relative to the design; its diameter is unaffected.
+If the Femoral iliacs are reported as well (clear the *Exclude ranges* field): left iliac 0.00 ± 0.28 mm (0.38 mm), right iliac +0.01 ± 0.32 mm (4.37 mm), whole vessel −0.09 ± 0.28 mm (1.38 mm). The right iliac's large centerline error is the elastic vessel lying bent relative to the design.
 
 The DICOM headers come from a phantom scan (patient name `TEST^SIMONE`), not a person. They still carry the scanning site's name and the scanner serial number, so remove these before making the repository public if that matters.

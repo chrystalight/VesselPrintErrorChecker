@@ -2,5 +2,6 @@
   "Torso":   {"ct_folder": "Torso/CT",   "design": "Torso/design.stl",   "centerlines": "Torso/centerlines",   "mm_per_unit": 10, "insert_hu": null,
               "exclude_mm": {"Aorta": [[0, 60]]}, "_exclude_reason": "water pooled in the lower aorta during scanning"},
   "Cranial": {"ct_folder": "Cranial/CT", "design": "Cranial/design.stl", "centerlines": "Cranial/centerlines", "mm_per_unit": 10, "insert_hu": null},
-  "Femoral": {"ct_folder": "Femoral/CT", "design": "Femoral/design.stl", "centerlines": "Femoral/centerlines", "mm_per_unit": 10, "insert_hu": 600}
+  "Femoral": {"ct_folder": "Femoral/CT", "design": "Femoral/design.stl", "centerlines": "Femoral/centerlines", "mm_per_unit": 10, "insert_hu": 600,
+              "exclude_mm": {"LeftIliac": "all", "RightIliac": "all"}, "_exclude_reason": "introducer sheaths in both iliacs are too bright for a reliable lumen edge"}
 }
