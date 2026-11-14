@@ -330,18 +330,39 @@ def run(ct, centerlines, design_poly, params=None, progress=None):
         flag[(r["s"] < p["end_trim_mm"]) | (r["s"] > r["s"][-1] - p["end_trim_mm"])] = "end"
         for lo, hi in (p.get("exclude_mm") or {}).get(name, []):     # user-chosen ranges, e.g. a water-filled stretch
             flag[(r["s"] >= lo) & (r["s"] <= hi)] = "user excluded"
-        junc = np.zeros(len(r["s"]), bool)
+        # Another branch's centerline passing through this cross-section means either
+        #  - a shared segment: both centerlines run along the same lumen for a while (e.g. ICA and ECA paths both
+        #    starting in the common carotid). It is measured once, in the branch listed first, and marked
+        #    "shared with X" in the others. Only stretches of at least 5 mm and 1.5 diameters count as shared;
+        #  - a junction: the other branch leaves at an angle, or only briefly runs alongside where it starts inside
+        #    its parent. The section straddles both lumens, so it is excluded (plus a margin either side).
+        n_st = len(r["s"]); junc = np.zeros(n_st, bool); par = np.full(n_st, "", dtype=object)
         for other, o in pr.items():
             if other == name: continue
-            for i in range(len(r["s"])):
+            for i in range(n_st):
                 if not np.isfinite(r["rings"][i, 0, 0]): continue
-                rel = o["C"] - r["C"][i]; near = np.abs(rel @ r["T"][i]) < 1.0
-                if not near.any(): continue
+                rel = o["C"] - r["C"][i]; near = np.nonzero(np.abs(rel @ r["T"][i]) < 1.0)[0]
+                if not len(near): continue
                 U, V = frames(r["T"][i:i + 1]); ring = r["rings"][i] - r["C"][i]
-                if points_in_polygon(np.c_[ring @ U[0], ring @ V[0]], np.c_[rel[near] @ U[0], rel[near] @ V[0]]).any(): junc[i] = True
+                inside = near[points_in_polygon(np.c_[ring @ U[0], ring @ V[0]], np.c_[rel[near] @ U[0], rel[near] @ V[0]])]
+                if not len(inside): continue
+                if np.max(np.abs(o["T"][inside] @ r["T"][i])) > np.cos(np.radians(30)):   # running alongside
+                    if not par[i]: par[i] = other
+                else:
+                    junc[i] = True
+        shared = np.full(n_st, "", dtype=object); i = 0
+        while i < n_st:                                   # runs of "running alongside the same other branch"
+            if not par[i]: i += 1; continue
+            j = i
+            while j + 1 < n_st and par[j + 1] == par[i]: j += 1
+            run_mm = (j - i + 1) * step; d_run = np.nanmedian(r["D"][i:j + 1]) if np.isfinite(r["D"][i:j + 1]).any() else 0
+            if run_mm < max(5.0, 1.5 * d_run): junc[i:j + 1] = True                  # brief: a branch origin
+            elif names.index(par[i]) < names.index(name): shared[i:j + 1] = f"shared with {par[i]}"
+            i = j + 1
         if junc.any():
             junc = np.convolve(junc, np.ones(2 * int(p["junction_margin_mm"] / step) + 1), "same") > 0
             flag[junc & (flag == "")] = "junction"
+        sh = (shared != "") & (flag == ""); flag[sh] = shared[sh]
         r["flag"] = flag
 
     say(0.6, "Registering print to design")

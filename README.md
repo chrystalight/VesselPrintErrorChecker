@@ -134,7 +134,8 @@ To leave out a stretch you know is unreliable, such as a section that held water
 |---|---|
 | `open` | more than 15% of rays found no wall: an outlet, a junction, or a lumen with no visible contrast |
 | `end` | within 2 mm of a centerline end |
-| `junction` | another branch's centerline passes through the section (plus 2 mm either side) |
+| `junction` | another branch leaves here: its centerline passes through the section at an angle, or only briefly alongside where it starts inside this one (plus 2 mm either side) |
+| `shared with X` | this stretch runs along the same lumen as branch X (for example, two branch paths that both start in a common trunk). It is measured once, in the branch listed first (X), so the trunk isn't counted twice. |
 | `insert contact` | an insert hides more than 25% of the wall |
 | `no design section` / `design mismatch` | the design branch is not found where expected |
 | `design artefact` | the design section jumps away from its local trend, as at a capped outlet or a branch ostium |
