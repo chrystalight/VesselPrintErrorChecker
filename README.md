@@ -86,7 +86,7 @@ Run `git pull`, or download the ZIP again into the same place, then restart Slic
 
 The centerlines must be drawn on the printed CT, not on the design. The design can be in any position or orientation, because the module registers it automatically.
 
-Tick **Treat bright insert as lumen** under *Parameters* if something bright, such as a catheter, sits inside a vessel. The insert then counts as part of the lumen: where it lies against the wall, its own outer surface is taken as the lumen edge. Stations where more than 60% of the wall is only seen through insert contact are excluded.
+Tick **Treat bright insert as lumen** under *Parameters* if something bright, such as an introducer sheath, sits inside a vessel. The insert then counts as part of the lumen: where it lies against the wall, its own outer surface is taken as the lumen edge. Stations where more than 60% of the wall is only seen through insert contact are excluded.
 
 To leave out a stretch you know is unreliable, such as a section that held water during scanning, fill in **Exclude ranges (mm)**. Give distances along the centerline, for example `Aorta: 0-60; ICA: 5-12`; several ranges per vessel are separated by commas. Excluded stretches are left out of the results and also out of the registration. They show as `user excluded` in the per-station table. The SIMONE Torso sample fills this in for you (`Aorta: 0-60`, where water pooled in the lower aorta).
 

@@ -34,7 +34,7 @@ DR = 0.05            # ray sampling step (mm)
 MIN_CONTRAST = 250   # HU between lumen and wall for a ray to count
 WALL_SEARCH = 2.5    # mm past the first rise searched for the wall peak
 MAX_BAD_RAYS = 0.15  # sections with more rays finding no wall are "open"
-WALL_RUN = 0.5       # mm of continuous wall needed to end a ray when an insert is present
+WALL_RUN = 0.7       # mm of continuous wall needed to end a ray when an insert is present
 MAX_INSERT_RAYS = 0.6  # sections where more of the wall than this is only seen through insert contact are excluded
 MAX_SHIFT_MM = 3.0   # a measured centre may move at most max(this, 0.75 x lumen radius) from the drawn centerline
 PASSES = 3
@@ -120,8 +120,8 @@ class CTVolume:
         self.M = np.asarray(world_to_ijk, float)
         self.core = self.rim = None
         if insert_hu is not None:
-            # An insert (e.g. a catheter) lies inside the lumen, so it counts as lumen. `core` is the insert itself,
-            # closed so that a hollow catheter's bore is included; `rim` adds its blurred edge (about one voxel).
+            # An insert (e.g. a sheath) lies inside the lumen, so it counts as lumen. `core` is the insert itself,
+            # closed so that a hollow sheath's bore is included; `rim` adds its blurred edge (about one voxel).
             box = np.ones((3, 3, 3), bool)
             core = binary_closing(self.v >= insert_hu, structure=box, iterations=max(1, int(round(0.8 / spacing_mm))))
             self.core = core.astype(np.float32)
@@ -143,10 +143,12 @@ class CTVolume:
 
 # ----------------------------------------------------------------------------- printed lumen from CT
 def lumen_section_insert(ct, c, u, v, r_max):
-    """Lumen contour when an insert (catheter) is in the lumen. Lumen = air or insert; the wall starts at the first
-    stretch of at least WALL_RUN mm that is neither. Coming from air, the edge is the usual half-maximum between air
-    and wall; where the insert touches the wall, the edge is the insert's own outer surface (half-maximum between
-    insert and wall). Returns radii, air level, and which rays ended on insert contact."""
+    """Lumen contour when an insert (e.g. a sheath) is in the lumen. Lumen = air or insert; the wall starts at the
+    first stretch of at least WALL_RUN mm that is neither (the blurred edge of the insert in air is shorter than
+    that and is skipped). Coming from air, the edge is the usual half-maximum between air and wall; where the insert
+    touches the wall, the edge is the insert's own outer surface (half-maximum between insert and wall), so the
+    search never passes through the wall behind it. Returns radii, air level, rays ending on insert contact, and
+    rays that pass through the insert."""
     r = np.arange(0, r_max, DR); n_run = int(WALL_RUN / DR)
     dirs = np.cos(ANG)[:, None] * u + np.sin(ANG)[:, None] * v
     X = c + r[None, :, None] * dirs[:, None, :]
@@ -156,19 +158,17 @@ def lumen_section_insert(ct, c, u, v, r_max):
     rad = np.full(N_RAYS, np.nan); contact = np.zeros(N_RAYS, bool); through = np.zeros(N_RAYS, bool)
     if solid.size < 20: return rad, L, contact, through
     Wref = np.median(solid); air_thr = (L + Wref) / 2
-    lumen = rim | (f < air_thr)
+    lumen = core | (f < air_thr)
     for k in range(N_RAYS):
         wall = ~lumen[k] & np.isfinite(f[k])
         run = np.convolve(wall, np.ones(n_run), "valid") == n_run       # run[i]: wall from i to i + n_run
         if not run.any(): continue
         i0 = int(np.argmax(run))
         if i0 == 0: continue
-        through[k] = rim[k, :i0].any()
+        through[k] = core[k, :i0].any()
         fk = f[k]; back = max(0, i0 - int(1.0 / DR))
-        cores = np.nonzero(core[k, back:i0])[0]                       # air between the insert and the wall?
-        gap = (fk[back + cores[-1]:i0] < air_thr).any() if len(cores) else True
-        if rim[k, i0 - 1] and not gap:                                # insert touching the wall
-            Wk = np.median(fk[i0 + int(0.3 / DR):i0 + n_run]); Tk = np.nanmax(fk[back:i0 + 1])
+        if core[k, i0 - 1]:                                           # insert touching the wall
+            Wk = np.median(fk[i0 + int(0.4 / DR):i0 + n_run]); Tk = np.nanmax(fk[back:i0 + 1])
             if Tk - Wk < MIN_CONTRAST: continue
             thr = (Tk + Wk) / 2; j = np.nonzero(fk[back:i0 + n_run] >= thr)[0]
             if not len(j): continue
@@ -176,7 +176,8 @@ def lumen_section_insert(ct, c, u, v, r_max):
             rad[k] = r[j] + DR * (fk[j] - thr) / max(fk[j] - fk[j + 1], 1e-6) if j + 1 < len(r) else r[j]
             contact[k] = True
         else:                                                         # air to wall
-            Wk = np.nanmax(np.where(rim[k, i0:i0 + int(WALL_SEARCH / DR)], -np.inf, fk[i0:i0 + int(WALL_SEARCH / DR)]))
+            seg = fk[i0:i0 + int(WALL_SEARCH / DR)]; Wk = np.nanmax(np.where(core[k, i0:i0 + len(seg)], -np.inf, seg))
+            Wk = min(Wk, Wref + 2 * MIN_CONTRAST)                     # do not let a nearby insert set the wall level
             if Wk - L < MIN_CONTRAST: continue
             thr = (L + Wk) / 2; a = np.nonzero(fk[back:i0 + n_run] < thr)[0]
             if not len(a): continue
@@ -569,7 +570,11 @@ def lumen_surface(ct, res):
     C, Rl, Tout, isend, okc, vd, vc = [], [], [], [], [], [], []
     for name, p in res["paths"].items():
         rows = [st for st in res["stations"] if st["branch"] == name]; n = len(p["s"])
-        r = nan_median_filter(p["D"] / 2, 11); r[~np.isfinite(r)] = np.nanmedian(p["D"] / 2) if np.isfinite(p["D"]).any() else 2.0
+        g = p["ok"] & np.isfinite(p["D"])           # radius from included stations only: elsewhere (junctions, open
+        if g.sum() >= 2:                            # sections) the measured size can be inflated and let in outside air
+            r = np.interp(np.arange(n), np.nonzero(g)[0], nan_median_filter(np.where(g, p["D"] / 2, np.nan), 11)[g])
+        else:
+            r = np.full(n, np.nanmedian(p["D"] / 2) if np.isfinite(p["D"]).any() else 2.0)
         e = np.zeros(n, bool); e[[0, -1]] = True; to = p["T"].copy(); to[0] = -to[0]
         C.append(p["C"]); Rl.append(r); Tout.append(to); isend.append(e)
         okc.append(np.array([st["excluded"] == "" for st in rows]))
