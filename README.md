@@ -124,7 +124,7 @@ To leave out a stretch you know is unreliable, such as a section that held water
 ## Method
 1. **Stations:** each centerline is resampled every 0.5 mm.
 2. **Printed lumen:** the CT is resliced in a plane normal to the centerline. The wall is found on 90 rays (every 4°) at the **half-maximum** between the lumen level and the wall peak. A ray counts only if the wall is at least 250 HU above the lumen, and rays that disagree with their neighbours are dropped. Each ray is limited to the local lumen radius + 2.5 mm, so it cannot run into a neighbouring vessel.
-3. **Re-centring:** each section is re-centred on its lumen centroid and the tangent is re-estimated; this is done 3 times. The printed centerline is therefore measured from the CT, not taken from where the curve was drawn.
+3. **Re-centring:** each section is re-centred on its lumen centroid and the tangent is re-estimated; this is done 3 times. The printed centerline is therefore measured from the CT, not taken from where the curve was drawn. A centre may move at most 3 mm (or ¾ of the lumen radius, if larger) from the drawn curve, so it can never jump into a neighbouring vessel where two vessels pass close together.
 4. **Registration:** the printed lumen is rigidly registered to the design with ICP. The search starts from 24 orientations × 9 positions. Each iteration only uses point pairs closer than a threshold that shrinks from 20 mm to 1.5 mm, which makes it robust to diameter bias and unmatched regions.
 5. **Design sections:** each branch is then aligned on its own, and the design is sectioned normal to its own centerline at the matching stations. This way, bending of an elastic print cannot shift which part of the design is compared.
 6. **Errors:** diameter error is printed minus design equivalent diameter. Centerline error is the distance from the printed to the design centerline after aligning the branch on its own (rigid ICP).
@@ -133,6 +133,8 @@ To leave out a stretch you know is unreliable, such as a section that held water
 | Reason | Meaning |
 |---|---|
 | `open` | more than 15% of rays found no wall: an outlet, a junction, or a lumen with no visible contrast |
+| `no lumen near path` | no air-filled lumen within 3 mm (or ¾ of the lumen radius) of the drawn centerline, e.g. the lumen is filled with fluid or the path runs through the wall. The centre is never allowed to jump into a neighbouring vessel. |
+| `next to unmeasurable section` | within 2 mm of an `open` or `no lumen near path` stretch; these transition sections are often partly filled |
 | `end` | within 2 mm of a centerline end |
 | `junction` | another branch leaves here: its centerline passes through the section at an angle, or only briefly alongside where it starts inside this one (plus 2 mm either side) |
 | `shared with X` | this stretch runs along the same lumen as branch X (for example, two branch paths that both start in a common trunk). It is measured once, in the branch listed first (X), so the trunk isn't counted twice. |

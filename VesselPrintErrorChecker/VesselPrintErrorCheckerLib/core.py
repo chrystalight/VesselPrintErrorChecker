@@ -37,6 +37,7 @@ MIN_CONTRAST = 250   # HU between lumen and wall for a ray to count
 WALL_SEARCH = 2.5    # mm past the first rise searched for the wall peak
 MAX_BAD_RAYS = 0.15  # sections with more rays finding no wall are "open"
 MAX_INSERT_RAYS = 0.25
+MAX_SHIFT_MM = 3.0   # a measured centre may move at most max(this, 0.75 x lumen radius) from the drawn centerline
 PASSES = 3
 SMOOTH_MM = 1.5
 
@@ -201,31 +202,40 @@ def fill_rays_circle(rad):
 def measure_print_path(ct, P0, step, r_search, max_diameter=None):
     """Iteratively re-centred cross-sections along one centerline.
     Ray length: max_diameter/2 + 1 mm if a caliper diameter is given; otherwise r_search on the first pass and
-    the local lumen radius + 2.5 mm afterwards (about a wall plus margin; stops rays running into a neighbouring vessel)."""
-    C, s = resample(P0, step); n = len(C)
+    the local lumen radius + 2.5 mm afterwards (about a wall plus margin; stops rays running into a neighbouring vessel).
+    Re-centring may move a point at most max(3 mm, 0.75 x lumen radius) from the drawn centerline. Where no lumen is
+    found that close (e.g. the lumen is filled, or the drawn path runs through the wall), the station is marked `lost`
+    rather than letting the centre jump into a neighbouring vessel."""
+    C, s = resample(P0, step); n = len(C); C0 = C.copy()
     rmax = np.full(n, max_diameter / 2 + 1.0 if max_diameter else r_search)
+    lim = np.full(n, MAX_SHIFT_MM)
     for it in range(PASSES):
         T = tangents(C, step); U, V = frames(T)
         newC, D = C.copy(), np.full(n, np.nan); bad, insert = np.ones(n), np.zeros(n)
-        rings = np.full((n, N_RAYS, 3), np.nan)
+        rings = np.full((n, N_RAYS, 3), np.nan); lost = np.zeros(n, bool)
         for i in range(n):
             rad, L, ins = lumen_section(ct, C[i], U[i], V[i], rmax[i])
             if ct.sample(C[i][None])[0] > L + MIN_CONTRAST / 2:
-                c2 = reseed(ct, C[i], U[i], V[i], rmax[i])
-                if c2 is None: continue
+                c2 = reseed(ct, C[i], U[i], V[i], min(rmax[i], lim[i] + 1.0))
+                if c2 is None or np.linalg.norm(c2 - C0[i]) > lim[i]:
+                    lost[i] = True; newC[i] = C0[i]; continue
                 C[i] = c2; rad, _, ins = lumen_section(ct, C[i], U[i], V[i], rmax[i])
             bad[i] = np.mean(~np.isfinite(rad) & ~ins); insert[i] = np.mean(ins)
             rf = fill_rays_circle(rad) if ins.any() else fill_rays(rad)
             if rf is None: continue
             xy = np.c_[rf * np.cos(ANG), rf * np.sin(ANG)]; A, cen = polygon(xy)
-            D[i] = 2 * np.sqrt(A / np.pi); newC[i] = C[i] + cen[0] * U[i] + cen[1] * V[i]
+            ci = C[i] + cen[0] * U[i] + cen[1] * V[i]
+            if np.linalg.norm(ci - C0[i]) > lim[i]:                 # drifted towards another lumen
+                lost[i] = True; newC[i] = C0[i]; bad[i] = 1.0; continue
+            D[i] = 2 * np.sqrt(A / np.pi); newC[i] = ci
             rings[i] = C[i] + xy[:, :1] * U[i] + xy[:, 1:] * V[i]
         C = newC
         if not max_diameter and np.isfinite(D).any():
             Rl = nan_median_filter(D / 2, 2 * int(2.5 / step) + 1)
             Rl[~np.isfinite(Rl)] = np.nanmedian(D / 2)
             rmax = np.minimum(r_search, Rl + 2.5)
-    return dict(s=s, C=C, T=tangents(C, step), D=D, bad=bad, insert=insert, rings=rings)
+            lim = np.maximum(MAX_SHIFT_MM, 0.75 * Rl)
+    return dict(s=s, C=C, T=tangents(C, step), D=D, bad=bad, insert=insert, rings=rings, lost=lost)
 
 
 # ----------------------------------------------------------------------------- design (original) sections
@@ -327,6 +337,11 @@ def run(ct, centerlines, design_poly, params=None, progress=None):
         flag = np.array([""] * len(r["s"]), dtype=object)
         flag[r["bad"] > MAX_BAD_RAYS] = "open"; flag[~np.isfinite(r["D"])] = "open"
         flag[r["insert"] > MAX_INSERT_RAYS] = "insert contact"
+        flag[r["lost"]] = "no lumen near path"
+        # sections next to a stretch with no measurable lumen are often partly filled (fluid surface) -> also excluded
+        nolum = np.isin(flag, ["open", "no lumen near path"]); k = int(p["junction_margin_mm"] / step)
+        edge = (np.convolve(nolum, np.ones(2 * k + 1), "same") > 0) & (flag == "")
+        flag[edge] = "next to unmeasurable section"
         flag[(r["s"] < p["end_trim_mm"]) | (r["s"] > r["s"][-1] - p["end_trim_mm"])] = "end"
         for lo, hi in (p.get("exclude_mm") or {}).get(name, []):     # user-chosen ranges, e.g. a water-filled stretch
             flag[(r["s"] >= lo) & (r["s"] <= hi)] = "user excluded"

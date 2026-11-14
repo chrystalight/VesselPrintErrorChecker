@@ -19,18 +19,19 @@ Some branch paths start in a common trunk and run along it together. The trunk i
 - **Torso:** RightCommonCarotid and RightSubclavian share the brachiocephalic trunk, which is counted under RightCommonCarotid.
 
 ## Where Cranial loses stations
-About a third of the Cranial centerline length is measured. The rest, in order of size:
-- **Water in the lumen** (`open`): the common carotid at 8–24 mm, and ICA at about 61–104 mm. Only a dry rescan would recover these.
-- **The print extends past the design** (`no design section`): ICA beyond 146 mm, ECA beyond 68 mm, OPTH before 27 mm. There is nothing in the design to compare against there.
-- **Branch junctions.**
+- **No air in the lumen** (`no lumen near path`, plus 2 mm either side): the common carotid at 8–24 mm, the ECA root at about 33–42 mm, and the ICA at about 61–104 mm (apart from two short air pockets). These read +10 to +190 HU instead of about −950, so they were filled when scanned. Only a dry rescan would recover them.
+- **The print extends past the design** (`no design section`): the ICA beyond 146 mm, the ECA beyond 68 mm (where the lumen widens to 5.5 mm, an outlet connector) and the OPTH before 27 mm. There is nothing in the design to compare against there.
+- **Junctions:** the ICA/ECA bifurcation and the OPTH origin.
+
+The ICA and ECA cross over each other near the bifurcation. Where the drawn ECA path runs through filled lumen there, the module deliberately does not let its centre jump across into the ICA.
 
 ## Expected results
 `expected_results/` has the summary and per-station CSVs from `scripts/run_headless.py` with default settings. Running a module in Slicer should give the same numbers, to within a station or two.
 
 | Vessel | Diameter error, mean ± SD | Centerline error (each branch aligned on its own) |
 |---|---|---|
-| Torso (Aorta 0–60 mm excluded: water) | −0.50 ± 0.20 mm (−8.2%) | 0.18 mm |
-| Cranial | −0.47 ± 0.22 mm (−15.7%) | 0.24 mm (OPTH too short to align on its own) |
-| Femoral (descending aorta only; iliacs excluded) | −0.25 ± 0.19 mm (−3.0%) | 0.17 mm |
+| Torso (Aorta 0–60 mm excluded: water) | −0.50 ± 0.21 mm (−8.2%) | 0.18 mm |
+| Cranial | −0.43 ± 0.15 mm (−14.7%) | 0.31 mm (OPTH too short to align on its own) |
+| Femoral (descending aorta only; iliacs excluded) | −0.26 ± 0.19 mm (−3.1%) | 0.17 mm |
 
 The DICOM headers come from a phantom scan (patient name `TEST^SIMONE`), not a person. They still carry the scanning site's name and the scanner serial number, so remove these before making the repository public if that matters.
