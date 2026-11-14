@@ -15,17 +15,59 @@ It was written to validate the SIMONE simulator's printed vessel modules. Their 
 
 ---
 
-## Requirements
-- [3D Slicer](https://download.slicer.org) 5.x (tested on 5.12.4). Nothing else needs installing.
-- [Git LFS](https://git-lfs.com) is not needed. The sample data is stored as ordinary files (about 700 MB).
+## Install (about 5 minutes, once)
 
-## Install
-1. Clone this repository:
-   ```
-   git clone <repo-url>
-   ```
-2. In Slicer, open **Edit → Application Settings → Modules**. Under **Additional module paths**, click **Add** and choose the `VesselPrintErrorChecker/VesselPrintErrorChecker` folder inside the clone (the folder that contains `VesselPrintErrorChecker.py`).
-3. Restart Slicer. The module is under **Modules → Quantification → Vessel Print Error Checker**.
+You need 3D Slicer and a copy of this repository. There is nothing else to install: no Python packages, no Slicer extensions, and no build step.
+
+### Step 1: Install 3D Slicer
+Download and install **3D Slicer 5.x** from <https://download.slicer.org>. It was tested on 5.12.4; any recent stable release should work.
+
+### Step 2: Download this repository
+Pick **one** of these:
+- **Without git:** on this repository's GitHub page, click the green **Code** button, then **Download ZIP**. Unzip it somewhere permanent, for example `Documents\VesselPrintErrorChecker`, not your Downloads folder, because Slicer will load the module from there every time it starts.
+- **With git:**
+  ```
+  git clone https://github.com/<owner>/VesselPrintErrorChecker.git
+  ```
+
+The download is about 700 MB, almost all of it the SIMONE sample CT scans.
+
+You should now have this structure:
+```
+VesselPrintErrorChecker\                     <- repository folder
+├── VesselPrintErrorChecker\                 <- THE MODULE FOLDER (you'll point Slicer here)
+│   ├── VesselPrintErrorChecker.py
+│   └── VesselPrintErrorCheckerLib\
+├── SIMONE_validation_files\
+├── scripts\
+└── README.md
+```
+
+### Step 3: Tell Slicer where the module is
+1. Open 3D Slicer.
+2. Go to **Edit → Application Settings** (on macOS: **Slicer → Preferences**).
+3. Click **Modules** in the list on the left.
+4. Find the box **Additional module paths** and click **Add** next to it.
+5. Browse to the **inner** `VesselPrintErrorChecker` folder, the one that contains `VesselPrintErrorChecker.py` (marked *THE MODULE FOLDER* above), and select it.
+6. Click **OK**. When Slicer asks to restart, click **Yes**, or close and reopen Slicer yourself.
+
+> **Shortcut:** instead of steps 2–6, drag `VesselPrintErrorChecker.py` from your file browser onto the Slicer window. Choose **Add Python scripted modules to the application**, tick the module, click **Yes** to add it to the module paths, then restart Slicer.
+
+### Step 4: Check it worked
+1. Click the **magnifying glass** next to the *Modules* drop-down on the toolbar (or press **Ctrl+F**).
+2. Type `Vessel Print` and open **Vessel Print Error Checker**. It also appears under **Modules → Quantification**.
+3. The left panel should show these sections: **SIMONE sample data**, **Inputs**, **Parameters**, **Measure print error** and **Inspect cross-section**.
+
+### Troubleshooting
+| Problem | Fix |
+|---|---|
+| The module isn't in the list | You probably added the outer repository folder. Remove it from *Additional module paths*, add the inner `VesselPrintErrorChecker` folder (the one with the `.py` file) and restart. |
+| It's listed but shows an error | Open **View → Python Console** to see the message. The folder must contain `VesselPrintErrorCheckerLib\` next to the `.py` file; don't move the `.py` on its own. |
+| The SIMONE sample list is empty | `SIMONE_validation_files` must sit next to the module folder, as in the repository. Keep the repository layout as it is. |
+| You moved or renamed the folder | Update the path in *Additional module paths* and restart. |
+
+### Updating
+Run `git pull`, or download the ZIP again into the same place, then restart Slicer.
 
 ## Quick start with the SIMONE data
 1. Open the module.
