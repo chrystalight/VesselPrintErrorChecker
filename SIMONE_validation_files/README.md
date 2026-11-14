@@ -6,7 +6,7 @@ These are CT scans, designs and centerlines for the three printed vessel modules
 |---|---|---|---|---|---|
 | Torso | elastic | 396 slices, 0.465 mm | aortic arch lumen | Aorta, Left/Right Common Carotid, Left/Right Subclavian | water was pooled in the lower aorta during scanning, so ~15–55 mm along *Aorta* reads 1–3 mm narrow (the contour follows the water surface); this stretch is excluded by default (`exclude_mm` in `samples.json`, shown in the module's *Exclude ranges* field) |
 | Cranial | rigid | 508 slices, 0.362 mm | carotid lumen | ICA, ECA, OPTH | some sections held water during scanning (no lumen contrast) and are excluded; OPTH is ~1–1.5 mm, near the resolution limit |
-| Femoral | elastic | 396 slices, 0.465 mm | aorto-iliac lumen | DescendingAorta, LeftIliac, RightIliac | a tube sits in both iliacs, so use *Treat bright insert as lumen* (HU ≥ 600); the iliacs end up fully excluded because the tube covers about half the wall |
+| Femoral | elastic | 396 slices, 0.465 mm | aorto-iliac lumen | DescendingAorta, LeftIliac, RightIliac | a catheter lies in both iliacs, so *Treat bright insert as lumen* (HU ≥ 600) is on; the iliacs are measured with the catheter counted as lumen and are noisier (±0.3 mm) than the aorta |
 
 ## What's in the files
 - **CT:** Siemens cone-beam CT (DynaCT), 109 kVp, 512 × 512, in HU. Each module was scanned separately; the simulator was moved between scans but not rotated.
@@ -28,10 +28,12 @@ The ICA and ECA cross over each other near the bifurcation. Where the drawn ECA 
 ## Expected results
 `expected_results/` has the summary and per-station CSVs from `scripts/run_headless.py` with default settings. Running a module in Slicer should give the same numbers, to within a station or two.
 
-| Vessel | Diameter error, mean ± SD | Centerline error (each branch aligned on its own) |
-|---|---|---|
-| Torso (Aorta 0–60 mm excluded: water) | −0.50 ± 0.21 mm (−8.2%) | 0.18 mm |
-| Cranial | −0.43 ± 0.15 mm (−14.7%) | 0.31 mm (OPTH too short to align on its own) |
-| Femoral (descending aorta only; iliacs excluded) | −0.26 ± 0.19 mm (−3.1%) | 0.17 mm |
+| Vessel | Diameter error, mean ± SD | Centerline error (rigid-body registration) | Stations (of which at junctions) |
+|---|---|---|---|
+| Torso (Aorta 0–60 mm excluded: water) | −0.49 ± 0.20 mm (−8.0%) | 0.51 mm | 467 (69) |
+| Cranial | −0.46 ± 0.14 mm (−15.4%) | 0.57 mm | 183 (41) |
+| Femoral | −0.07 ± 0.30 mm (−0.6%) | 1.43 mm | 234 (7) |
+
+Per branch in the Femoral: descending aorta −0.24 ± 0.15 mm (0.36 mm), left iliac +0.04 ± 0.32 mm (0.41 mm), right iliac +0.03 ± 0.33 mm (4.73 mm). The right iliac's large centerline error is the elastic vessel lying bent relative to the design; its diameter is unaffected.
 
 The DICOM headers come from a phantom scan (patient name `TEST^SIMONE`), not a person. They still carry the scanning site's name and the scanner serial number, so remove these before making the repository public if that matters.

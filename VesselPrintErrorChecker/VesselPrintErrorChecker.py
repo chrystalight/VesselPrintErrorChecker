@@ -107,7 +107,7 @@ class VesselPrintErrorCheckerWidget(ScriptedLoadableModuleWidget):
         self.minDiam = self._spin(0, 10, d["min_diameter_mm"], " mm", "Design diameters below this are excluded as below CT resolution (0 = keep all)")
         self.junction = self._spin(0, 20, d["junction_margin_mm"], " mm", "Extra exclusion either side of a vessel junction")
         self.trim = self._spin(0, 20, d["end_trim_mm"], " mm", "Ignore this much at each end of a centerline")
-        self.mismatch = self._spin(0.5, 20, d["mismatch_mm"], " mm", "Print and design centres further apart than this (after aligning the branch) are not compared")
+        self.mismatch = self._spin(0.5, 20, d["mismatch_mm"], " mm", "Print and design centres further apart than this are treated as a failed match and not compared")
         self.insertCheck = qt.QCheckBox("Treat bright insert as lumen, HU ≥")
         self.insertHU = self._spin(100, 5000, 600, "", "Voxels at or above this value are an insert (e.g. a tube) inside the lumen")
         irow = qt.QHBoxLayout(); irow.addWidget(self.insertCheck); irow.addWidget(self.insertHU)
@@ -136,6 +136,14 @@ class VesselPrintErrorCheckerWidget(ScriptedLoadableModuleWidget):
         legend = qt.QLabel("<span style='color:#22d3ee'>■</span> printed lumen &nbsp; "
                            "<span style='color:#f59e0b'>■</span> design lumen (mapped into the CT)")
         iform.addRow(legend)
+        self.editCheck = qt.QCheckBox("Edit printed contour (drag its points in the cross-section view)")
+        iform.addRow(self.editCheck)
+        erow = qt.QHBoxLayout()
+        self.applyEditButton = qt.QPushButton("Apply edited contour"); self.applyEditButton.enabled = False
+        self.applyEditButton.setToolTip("Use the edited outline for this station: its diameter, error and centre are recomputed")
+        self.toggleButton = qt.QPushButton("Exclude / include station")
+        self.toggleButton.setToolTip("Leave this station out of the results, or bring back an excluded one that has both contours")
+        erow.addWidget(self.applyEditButton); erow.addWidget(self.toggleButton); iform.addRow(erow)
 
         # --- 3D view
         vbox = ctk.ctkCollapsibleButton(); vbox.text = "3D view"; self.layout.addWidget(vbox)
@@ -163,6 +171,9 @@ class VesselPrintErrorCheckerWidget(ScriptedLoadableModuleWidget):
         self.saveButton.connect("clicked()", self.onSave)
         self.tableChoice.connect("currentIndexChanged(int)", self.onTableChoice)
         self.show3D.connect("toggled(bool)", self.on3DOptions)
+        self.editCheck.connect("toggled(bool)", self.onEditToggled)
+        self.applyEditButton.connect("clicked()", self.onApplyEdit)
+        self.toggleButton.connect("clicked()", self.onToggleStation)
         self.colorBy.connect("currentIndexChanged(int)", self.on3DOptions)
         self.colorMax.connect("valueChanged(double)", self.on3DOptions)
         self._plotConnected = []
@@ -266,13 +277,37 @@ class VesselPrintErrorCheckerWidget(ScriptedLoadableModuleWidget):
     def onStationChanged(self, value):
         name = self.vesselCombo.currentText
         if not name or self.logic.result is None: return
-        st = self.logic.inspect(name, int(value), follow3D=self.show3D.checked and self.follow3D.checked)
+        st = self.logic.inspect(name, int(value), follow3D=self.show3D.checked and self.follow3D.checked,
+                                editable=self.editCheck.checked)
         self.logic.updatePlots(name, int(value))
         f = lambda x, fmt: "–" if x is None or not np.isfinite(x) else format(x, fmt)
-        self.info.text = (f"<b>{name}</b>, s = {st['s_mm']:.1f} mm &nbsp; ({st['excluded'] or 'included'})<br>"
+        tag = (st['excluded'] or 'included') + (", at a junction" if st.get('at_junction') else "") + (", edited" if st.get('edited') else "")
+        self.info.text = (f"<b>{name}</b>, s = {st['s_mm']:.1f} mm &nbsp; ({tag})<br>"
                           f"Diameter: printed {f(st['D_print_mm'], '.2f')} mm, design {f(st['D_design_mm'], '.2f')} mm, "
                           f"error {f(st['dD_mm'], '+.2f')} mm ({f(st['dD_pct'], '+.1f')}%)<br>"
                           f"Centerline error: {f(st['cl_dev_mm'], '.2f')} mm")
+
+    def onEditToggled(self, on):
+        self.applyEditButton.enabled = on
+        self.onStationChanged(self.stationSlider.value)
+
+    def _afterEdit(self, msg):
+        lg = self.logic; all_ = [r for r in lg.summary if r["branch"] == "ALL"][0]
+        self.status.text = (f"{msg}<br>Whole vessel (all branches): diameter error {all_['dD_mean_mm']:+.2f} \u00b1 {all_['dD_sd_mm']:.2f} mm "
+                            f"({all_['dD_mean_pct']:+.1f}%), centerline error {all_['cl_dev_mean_mm']:.2f} mm, n = {all_['n_stations']} stations.")
+        lg.colour3D(COLOR_BY[self.colorBy.currentIndex][1], self.colorMax.value)
+        self.onTableChoice(self.tableChoice.currentIndex)
+        self.onStationChanged(self.stationSlider.value)
+
+    def onApplyEdit(self):
+        if self.logic.result is None or not self.vesselCombo.currentText: return
+        with slicer.util.tryWithErrorDisplay("Could not apply the contour.", waitCursor=True):
+            self._afterEdit(self.logic.applyContour(self.vesselCombo.currentText, int(self.stationSlider.value)))
+
+    def onToggleStation(self):
+        if self.logic.result is None or not self.vesselCombo.currentText: return
+        with slicer.util.tryWithErrorDisplay("Could not change the station.", waitCursor=True):
+            self._afterEdit(self.logic.toggleStation(self.vesselCombo.currentText, int(self.stationSlider.value)))
 
     def on3DOptions(self, *args):
         if self.logic.result is None: return
@@ -362,7 +397,7 @@ class VesselPrintErrorCheckerLogic(ScriptedLoadableModuleLogic):
 
     # --- run
     def run(self, volNode, modelNode, curveNodes, params, progress=None):
-        ct = self._ct(volNode, params.get("insert_hu"))
+        ct = self._ct(volNode, params.get("insert_hu")); self.ct = ct; self.step = params.get("station_spacing_mm", 0.5)
         curves = {}
         for c in curveNodes:
             P = slicer.util.arrayFromMarkupsCurvePoints(c, world=True)
@@ -371,10 +406,51 @@ class VesselPrintErrorCheckerLogic(ScriptedLoadableModuleLogic):
         self.volumeNode = volNode
         self.designPoly = self._design(modelNode); self.inputDesignNode = modelNode
         self.result = core.run(ct, curves, self.designPoly, params, progress)
-        self.summary = core.summarise(self.result["stations"], params.get("station_spacing_mm", 0.5))
+        self.refresh(rebuild3D=False)
+
+    def refresh(self, rebuild3D=True):
+        """Recompute the summary, tables and plots (and the 3D surface) from the per-station results."""
+        self.summary = core.summarise(self.result["stations"], self.step)
         self.stationsTable = self._table("VPE stations", self.result["stations"])
         self.summaryTable = self._table("VPE summary", self.summary)
         self._plots()
+        if rebuild3D: self.build3D()
+
+    # --- manual corrections
+    def applyContour(self, name, i):
+        """Replace station i's printed contour with the (edited) curve shown in the cross-section view."""
+        node = slicer.mrmlScene.GetFirstNodeByName("VPE printed contour")
+        pts = slicer.util.arrayFromMarkupsCurvePoints(node, world=True) if node else np.zeros((0, 3))
+        if len(pts) < 8: return "No contour to apply at this station."
+        res = self.result; p = res["paths"][name]; row = [s for s in res["stations"] if s["branch"] == name][i]
+        c0, n = p["C"][i], p["T"][i]; U, _ = core.frames(p["T"][max(0, i - 1):i + 1]); u = U[-1]; v = np.cross(n, u)
+        xy = np.c_[(pts - c0) @ u, (pts - c0) @ v]; A, cen = core.polygon(xy)
+        if A <= 0: return "The contour is not a valid outline."
+        c = c0 + cen[0] * u + cen[1] * v; D = 2 * np.sqrt(A / np.pi)
+        ang = np.arctan2(xy[:, 1] - cen[1], xy[:, 0] - cen[0]) % (2 * np.pi); rad = np.hypot(xy[:, 0] - cen[0], xy[:, 1] - cen[1])
+        o = np.argsort(ang); rr = np.interp(core.ANG, np.r_[ang[o] - 2 * np.pi, ang[o], ang[o] + 2 * np.pi], np.tile(rad[o], 3))
+        p["rings"][i] = c + (rr * np.cos(core.ANG))[:, None] * u + (rr * np.sin(core.ANG))[:, None] * v
+        p["C"][i] = c; p["D"][i] = D; p["valid"][i] = True
+        row.update(D_print_mm=float(D), x=float(c[0]), y=float(c[1]), z=float(c[2]), edited=1)
+        Dd = row["D_design_mm"]
+        if not np.isfinite(Dd):
+            self.refresh(); return "Contour saved, but there is no design cross-section here to compare with, so the station stays excluded."
+        ref = p["Co"][np.isfinite(p["Co"]).all(1) & p["ok"]]
+        cl = float(core.cKDTree(core.densify(ref)).query(c @ res["R"].T + res["t"])[0]) if len(ref) >= 2 else float("nan")
+        row.update(dD_mm=float(D - Dd), dD_pct=float(100 * (D - Dd) / Dd), cl_dev_mm=cl, excluded="")
+        p["ok"][i] = True
+        self.refresh(); return f"Contour applied: printed diameter {D:.2f} mm, error {D - Dd:+.2f} mm."
+
+    def toggleStation(self, name, i):
+        """Exclude an included station, or bring back one that has both diameters."""
+        p = self.result["paths"][name]; row = [s for s in self.result["stations"] if s["branch"] == name][i]
+        if row["excluded"] == "":
+            row["excluded"] = "user excluded"; p["ok"][i] = False; msg = "Station excluded."
+        elif np.isfinite(row["D_print_mm"]) and np.isfinite(row["D_design_mm"]) and np.isfinite(row["dD_mm"]):
+            msg = f"Station included (it was: {row['excluded']})."; row["excluded"] = ""; row["edited"] = 1; p["ok"][i] = True
+        else:
+            return "This station has no printed or no design cross-section, so it cannot be included."
+        self.refresh(); return msg
 
     # --- outputs
     @staticmethod
@@ -458,7 +534,7 @@ class VesselPrintErrorCheckerLogic(ScriptedLoadableModuleLogic):
             self.chartD.SetTitle(f"{name}: diameter error" + (f"  (mean {m.mean():+.2f} mm, n = {n_ok})" if m.size else "  (no included stations)"))
             c = fin(cl)
             self.chartC.SetTitle(f"{name}: centerline error" + (f"  (mean {c.mean():.2f} mm)" if c.size else
-                                                                 "  (branch too short to align on its own)"))
+                                                                 "  (no included stations)"))
             g = self.guideTable.GetTable(); g.SetValue(0, 0, float(s_all[0])); g.SetValue(1, 0, float(s_all[-1])); g.Modified()
             self._plotted = name
         t = self.markerTable.GetTable(); x = float(s_all[i])
@@ -484,7 +560,7 @@ class VesselPrintErrorCheckerLogic(ScriptedLoadableModuleLogic):
         if vd and not self.volumeNode.GetAttribute("VPE.WindowSet"):          # once per volume: air -> resin contrast
             vd.AutoWindowLevelOff(); vd.SetWindowLevel(1800, -100); self.volumeNode.SetAttribute("VPE.WindowSet", "1")
 
-    def inspect(self, name, i, follow3D=False):
+    def inspect(self, name, i, follow3D=False, editable=False):
         """Reorient the Red slice view onto station i of vessel `name` and draw both contours."""
         p = self.result["paths"][name]
         row = [s for s in self.result["stations"] if s["branch"] == name][i]
@@ -509,40 +585,15 @@ class VesselPrintErrorCheckerLogic(ScriptedLoadableModuleLogic):
             if cam:
                 fp, pos = np.array(cam.GetFocalPoint()), np.array(cam.GetPosition())
                 cam.SetFocalPoint(*c); cam.SetPosition(*(c + pos - fp))
-        self._contour("VPE printed contour", p["rings"][i] if np.isfinite(p["rings"][i]).all() else None, (0.13, 0.83, 0.93))
+        self._contour("VPE printed contour", p["rings"][i] if np.isfinite(p["rings"][i]).all() else None, (0.13, 0.83, 0.93), editable)
         self._contour("VPE design contour", p["design_loops_in_ct"][i], (0.96, 0.62, 0.04))
         return row
 
     def build3D(self):
-        """Printed lumen surface (rings joined between consecutive included stations, in CT space) carrying the
-        per-station errors as point data, plus the design surface mapped into CT space."""
-        res = self.result; n_r = core.N_RAYS
-        keys = [k for _, k in COLOR_BY if k]
-        pts, polys, arrays, off = [], [], {k: [] for k in keys}, 0
-        for name, p in res["paths"].items():
-            rows = [s for s in res["stations"] if s["branch"] == name]
-            rings = p["rings"]; good = p["ok"] & np.isfinite(rings).all(axis=(1, 2))
-            idx = np.nonzero(good)[0]
-            for k in range(len(idx) - 1):
-                if idx[k + 1] - idx[k] != 1: continue
-                a, b = off + k * n_r, off + (k + 1) * n_r
-                for j in range(n_r):
-                    j1 = (j + 1) % n_r; polys.append((a + j, a + j1, b + j1, b + j))
-            for i in idx:
-                pts.append(rings[i])
-                for key in keys: arrays[key].append(np.full(n_r, rows[i][key]))
-            off += len(idx) * n_r
-        poly = vtk.vtkPolyData()
-        if pts:
-            from vtk.util.numpy_support import numpy_to_vtk, numpy_to_vtkIdTypeArray
-            P = np.vstack(pts); vp = vtk.vtkPoints(); vp.SetData(numpy_to_vtk(P.astype(float), deep=True))
-            conn = np.hstack([np.full((len(polys), 1), 4), np.array(polys)]).ravel().astype(np.int64)
-            cells = vtk.vtkCellArray(); cells.SetCells(len(polys), numpy_to_vtkIdTypeArray(conn, deep=True))
-            poly.SetPoints(vp); poly.SetPolys(cells)
-            for key in keys:
-                arr = numpy_to_vtk(np.concatenate(arrays[key]).astype(float), deep=True); arr.SetName(key)
-                poly.GetPointData().AddArray(arr)
-            nf = vtk.vtkPolyDataNormals(); nf.SetInputData(poly); nf.SplittingOff(); nf.Update(); poly = nf.GetOutput()
+        """Printed lumen as one continuous surface segmented from the CT (junctions included), carrying the errors
+        of the nearest included station, plus the design surface mapped into CT space."""
+        res = self.result
+        poly = core.lumen_surface(self.ct, res)
         m = self._node("vtkMRMLModelNode", "VPE printed lumen"); m.SetAndObservePolyData(poly)
         if m.GetDisplayNode() is None: m.CreateDefaultDisplayNodes()
         m.GetDisplayNode().SetVisibility2D(False); m.GetDisplayNode().SetBackfaceCulling(False)
@@ -607,13 +658,17 @@ class VesselPrintErrorCheckerLogic(ScriptedLoadableModuleLogic):
         except Exception:
             pass
 
-    def _contour(self, name, pts, color):
+    def _contour(self, name, pts, color, editable=False):
         node = self._node("vtkMRMLMarkupsClosedCurveNode", name, hidden=True)
         if node.GetDisplayNode() is None: node.CreateDefaultDisplayNodes()
-        node.SetCurveTypeToLinear(); node.SetLocked(True)
         dn = node.GetDisplayNode()
         dn.SetPointLabelsVisibility(False); dn.SetPropertiesLabelVisibility(False)
-        dn.SetUseGlyphScale(False); dn.SetGlyphSize(0.05)                     # hide control points, keep the line
+        dn.SetUseGlyphScale(False)
+        if editable:                              # a few draggable points on a smooth closed curve
+            node.SetCurveTypeToKochanekSpline(); node.SetLocked(False); dn.SetGlyphSize(0.35)
+            if pts is not None and len(pts) >= 3: pts = np.asarray(pts)[np.linspace(0, len(pts), 16, endpoint=False).astype(int)]
+        else:
+            node.SetCurveTypeToLinear(); node.SetLocked(True); dn.SetGlyphSize(0.05)   # hide points, keep the line
         dn.SetCurveLineSizeMode(dn.UseLineDiameter); dn.SetLineDiameter(0.12)
         dn.SetColor(*color); dn.SetSelectedColor(*color)
         dn.SetSliceProjection(True); dn.SetSliceProjectionUseFiducialColor(True); dn.SetSliceProjectionOpacity(1.0)

@@ -9,7 +9,7 @@ A **vessel** here is one connected vessel tree (one CT and one design STL), for 
 
 It reports two errors along every branch, plus a summary for the whole vessel:
 - **Diameter error:** printed minus design lumen diameter, as the equivalent diameter 2√(A/π).
-- **Centerline error:** the distance between the printed and design centerlines after the branch is rigidly aligned on its own. This measures the branch's printed shape. It is not affected by how a soft, elastic print happened to lie in the scanner.
+- **Centerline error:** the distance between the printed and design centerlines after the print is registered to the design once, as a single rigid body. For elastic prints this includes how the soft vessel lay in the scanner.
 
 It was written to validate the SIMONE simulator's printed vessel modules. Their scans and designs are included, so you can run it straight away.
 
@@ -86,7 +86,7 @@ Run `git pull`, or download the ZIP again into the same place, then restart Slic
 
 The centerlines must be drawn on the printed CT, not on the design. The design can be in any position or orientation, because the module registers it automatically.
 
-Tick **Treat bright insert as lumen** under *Parameters* if something bright, such as a tube, sits inside a vessel. Stations where it covers more than 25% of the wall are excluded.
+Tick **Treat bright insert as lumen** under *Parameters* if something bright, such as a catheter, sits inside a vessel. The insert then counts as part of the lumen: where it lies against the wall, its own outer surface is taken as the lumen edge. Stations where more than 60% of the wall is only seen through insert contact are excluded.
 
 To leave out a stretch you know is unreliable, such as a section that held water during scanning, fill in **Exclude ranges (mm)**. Give distances along the centerline, for example `Aorta: 0-60; ICA: 5-12`; several ranges per vessel are separated by commas. Excluded stretches are left out of the results and also out of the registration. They show as `user excluded` in the per-station table. The SIMONE Torso sample fills this in for you (`Aorta: 0-60`, where water pooled in the lower aorta).
 
@@ -102,11 +102,12 @@ To leave out a stretch you know is unreliable, such as a section that held water
   - that station's numbers.
 
   The view re-centres and zooms onto the contours every time you change station, even if you have panned or zoomed in the meantime.
-- **3D view:** tick **Show 3D view** under *3D view*. A 3D panel opens next to the cross-section. It shows the measured printed lumen over a translucent grey copy of the design, registered into the CT.
+- **Correcting a station by hand:** if an automatic contour is a bit off, tick **Edit printed contour** under *Inspect cross-section*. The cyan contour becomes a smooth curve with 16 points you can drag in the cross-section view. Click **Apply edited contour** to use it: that station's diameter, error and centre are recomputed, and the summary, plots and 3D view update. **Exclude / include station** leaves a station out, or brings back an excluded one that has both contours. Changed stations are marked `edited` in the per-station table. Edits are lost if you click *Measure print error* again, so save the CSVs first.
+- **3D view:** tick **Show 3D view** under *3D view*. A 3D panel opens next to the cross-section. It shows the printed lumen as one continuous surface segmented from the CT, junctions included, over a translucent grey copy of the design registered into the CT.
   - **Colour printed lumen by:** choose *Diameter error* (blue = narrower than designed, red = wider), *Centerline error*, or *None*. A colour legend appears in the 3D view.
   - **Colour scale limit:** sets the end of the colour scale. Diameter error runs from −limit to +limit; centerline error runs from 0 to the limit.
   - **Centre 3D view on the inspected station:** keeps the 3D camera on the station you are inspecting, without changing your zoom or angle.
-  - Only included stations are drawn. Gaps in the surface are excluded stations.
+  - The surface is coloured from the nearest included station. Parts with nothing to compare against are grey. Stretches with no air in the lumen are missing from the surface.
   - The original design model is hidden in 3D because it sits in its own coordinate frame, away from the CT. The registered copy is called *VPE design (registered to CT)*.
 
 | Column (per-station table) | Meaning |
@@ -115,9 +116,10 @@ To leave out a stretch you know is unreliable, such as a section that held water
 | `D_print_mm`, `D_design_mm` | equivalent lumen diameters |
 | `dD_mm`, `dD_pct` | diameter error, print − design |
 | `branch` | which centerline the station belongs to |
-| `cl_dev_mm` | centerline error: distance to the design centerline after aligning this branch on its own (branches with at least 15 mm included) |
-| `cl_dev_whole_vessel_mm` | for reference only: the same distance after one alignment of the whole vessel. For elastic prints it includes how the vessel lay during the scan. |
-| `insert_hidden_frac` | fraction of the wall hidden by an insert |
+| `cl_dev_mm` | centerline error: distance from the printed centre to the design centerline under the single rigid-body registration |
+| `at_junction` | 1 if the station is at a junction and its diameter error comes from the wall offset (see Method) |
+| `edited` | 1 if the station was changed by hand |
+| `insert_hidden_frac` | fraction of the wall seen only where an insert touches it |
 | `excluded` | empty if the station is included, otherwise the reason (see below) |
 | `x, y, z` | printed centerline point (CT world coordinates) |
 
@@ -126,9 +128,11 @@ To leave out a stretch you know is unreliable, such as a section that held water
 2. **Printed lumen:** the CT is resliced in a plane normal to the centerline. The wall is found on 90 rays (every 4°) at the **half-maximum** between the lumen level and the wall peak. A ray counts only if the wall is at least 250 HU above the lumen, and rays that disagree with their neighbours are dropped. Each ray is limited to the local lumen radius + 2.5 mm, so it cannot run into a neighbouring vessel.
 3. **Re-centring:** each section is re-centred on its lumen centroid and the tangent is re-estimated; this is done 3 times. The printed centerline is therefore measured from the CT, not taken from where the curve was drawn. A centre may move at most 3 mm (or ¾ of the lumen radius, if larger) from the drawn curve, so it can never jump into a neighbouring vessel where two vessels pass close together.
 4. **Registration:** the printed lumen is rigidly registered to the design with ICP. The search starts from 24 orientations × 9 positions. Each iteration only uses point pairs closer than a threshold that shrinks from 20 mm to 1.5 mm, which makes it robust to diameter bias and unmatched regions.
-5. **Design sections:** each branch is then aligned on its own, and the design is sectioned normal to its own centerline at the matching stations. This way, bending of an elastic print cannot shift which part of the design is compared.
-6. **Errors:** diameter error is printed minus design equivalent diameter. Centerline error is the distance from the printed to the design centerline after aligning the branch on its own (rigid ICP).
-7. **Exclusions:** each excluded station gets one of these reasons in the `excluded` column.
+5. **Design sections:** each printed station is mapped into the design with that one registration, and the design is sectioned normal to its own centerline there (nearest lumen loop, re-centred over 3 passes).
+6. **Errors:** diameter error is printed minus design equivalent diameter. Centerline error is the distance from the printed centre to the design centerline under the rigid-body registration.
+7. **Wall-offset check:** each station's printed wall points are also compared with the design surface directly, fitting *signed distance = radius error + sideways shift · normal*. Twice the radius error is a second, independent estimate of the diameter error. Ordinary stations where the two estimates differ by more than 0.3 mm are excluded as `design mismatch` (they were matched to the wrong place in the design). On the SIMONE data the two agree to within 0.02 ± 0.04 mm.
+8. **Junctions:** where a branch passes a side branch's opening, the cross-section is open, so an equivalent diameter is not defined. There the diameter error is taken as twice the radius error from the wall-offset fit, using the part of the wall that is present (at least 40% of it, with no gap over 200°), and the centerline error is the fitted shift. A branch's first or last stations that still lie inside its parent are not used; that wall is measured in the parent.
+9. **Exclusions:** each excluded station gets one of these reasons in the `excluded` column.
 
 | Reason | Meaning |
 |---|---|
@@ -136,10 +140,11 @@ To leave out a stretch you know is unreliable, such as a section that held water
 | `no lumen near path` | no air-filled lumen within 3 mm (or ¾ of the lumen radius) of the drawn centerline, e.g. the lumen is filled with fluid or the path runs through the wall. The centre is never allowed to jump into a neighbouring vessel. |
 | `next to unmeasurable section` | within 2 mm of an `open` or `no lumen near path` stretch; these transition sections are often partly filled |
 | `end` | within 2 mm of a centerline end |
-| `junction` | another branch leaves here: its centerline passes through the section at an angle, or only briefly alongside where it starts inside this one (plus 2 mm either side) |
+| `junction` | a junction station that could not be measured from the wall offset (too little wall, or a poor fit), or a branch's first or last stations inside its parent |
 | `shared with X` | this stretch runs along the same lumen as branch X (for example, two branch paths that both start in a common trunk). It is measured once, in the branch listed first (X), so the trunk isn't counted twice. |
-| `insert contact` | an insert hides more than 25% of the wall |
-| `no design section` / `design mismatch` | the design branch is not found where expected |
+| `insert contact` | more than 60% of the wall is only seen where an insert touches it |
+| `no design section` | the design has no lumen there (the print extends past the design) |
+| `design mismatch` | the two diameter-error estimates disagree by more than 0.3 mm, or the design centre is more than the *Mismatch limit* (8 mm) away |
 | `design artefact` | the design section jumps away from its local trend, as at a capped outlet or a branch ostium |
 | `below CT resolution` | the design diameter is under the *Min design diameter* setting (0 = off) |
 | `user excluded` | inside a range given in *Exclude ranges (mm)* |
@@ -164,5 +169,6 @@ scripts/run_headless.py             command-line runner
 
 ## Known limitations
 - Lumens below about 2 mm (around 5 voxels at 0.4 mm) are measured narrow because of CT blur, so treat them as approximate.
+- Sections with an insert are less precise (about ±0.3 mm on the SIMONE iliacs) because part of the wall is inferred from the insert's surface.
 - Fluid left in a lumen during scanning can hide the wall. Fully filled sections are excluded as `open`, but partly filled sections read narrow, because the contour follows the air–fluid surface instead of the wall. In the inspect view the contour then has a flat side. Scan the prints dry, or use *Treat bright insert as lumen* only for solid inserts, not fluid.
 - Registration is least certain when the scanned vessels cover only part of the design, as with the SIMONE Cranial module. There the result can shift slightly (a few stations, ~0.03 mm) depending on centerline order.

@@ -6,15 +6,14 @@ plus its 4x4 world->IJK matrix. Centerlines are (N, 3) point arrays in the same 
 (original lumen) is a vtkPolyData in its own frame; it is registered to the print here.
 
 Terms: a *vessel* is one connected vessel tree (one CT, one design STL); a *branch* is one centerline in it.
-Per station the engine reports the printed and design equivalent diameters (2*sqrt(A/pi)), their difference, and the
-centerline error: the distance between printed and design centerlines after aligning that branch on its own (rigid).
-The distance after a single alignment of the whole vessel is also kept (cl_dev_whole_vessel_mm) for reference; for
-elastic prints it includes how the soft vessel happened to lie during the scan.
+The print is registered to the design once, as a rigid body. Per station the engine reports the printed and design
+equivalent diameters (2*sqrt(A/pi)), their difference, and the centerline error: the distance between the printed
+and design centerlines under that single registration.
 """
 import numpy as np
 import vtk
 from vtk.util.numpy_support import vtk_to_numpy
-from scipy.ndimage import map_coordinates, gaussian_filter1d, binary_dilation, label
+from scipy.ndimage import map_coordinates, gaussian_filter1d, binary_dilation, binary_closing, label
 from scipy.spatial import cKDTree
 from scipy.spatial.transform import Rotation
 
@@ -23,8 +22,7 @@ DEFAULTS = dict(
     max_search_radius_mm=12.0,  # how far a ray may look for the wall on the first pass
     end_trim_mm=2.0,            # ignore this much at each path end
     junction_margin_mm=2.0,     # extra exclusion either side of a junction
-    min_path_fit_mm=15.0,       # shortest branch (included length) that gets its own rigid fit / centerline error
-    mismatch_mm=2.0,            # print/design centres further apart than this (after the branch fit) are not compared
+    mismatch_mm=8.0,            # print/design centres further apart than this are treated as a failed match
     min_diameter_mm=0.0,        # design diameters below this are excluded as below CT resolution (0 = keep all)
     insert_hu=None,             # voxels >= this are an insert (e.g. a tube) and are treated as lumen (None = off)
     insert_dilate_mm=1.0,
@@ -36,7 +34,8 @@ DR = 0.05            # ray sampling step (mm)
 MIN_CONTRAST = 250   # HU between lumen and wall for a ray to count
 WALL_SEARCH = 2.5    # mm past the first rise searched for the wall peak
 MAX_BAD_RAYS = 0.15  # sections with more rays finding no wall are "open"
-MAX_INSERT_RAYS = 0.25
+WALL_RUN = 0.5       # mm of continuous wall needed to end a ray when an insert is present
+MAX_INSERT_RAYS = 0.6  # sections where more of the wall than this is only seen through insert contact are excluded
 MAX_SHIFT_MM = 3.0   # a measured centre may move at most max(this, 0.75 x lumen radius) from the drawn centerline
 PASSES = 3
 SMOOTH_MM = 1.5
@@ -94,8 +93,9 @@ def frames(T):
     U = np.array(u); return U, np.cross(T, U)
 
 
-def kabsch(A, B):
-    ca, cb = A.mean(0), B.mean(0); H = (A - ca).T @ (B - cb); U, _, Vt = np.linalg.svd(H)
+def kabsch(A, B, w=None):
+    w = np.ones(len(A)) if w is None else np.asarray(w, float)
+    ca, cb = np.average(A, 0, w), np.average(B, 0, w); H = ((A - ca) * w[:, None]).T @ (B - cb); U, _, Vt = np.linalg.svd(H)
     D = np.diag([1, 1, np.sign(np.linalg.det(Vt.T @ U.T))]); R = Vt.T @ D @ U.T
     return R, cb - R @ ca
 
@@ -118,12 +118,14 @@ class CTVolume:
     def __init__(self, array_kji, world_to_ijk, insert_hu=None, insert_dilate_mm=1.0, spacing_mm=0.4):
         self.v = np.asarray(array_kji, dtype=np.float32).copy()
         self.M = np.asarray(world_to_ijk, float)
-        self.mask = None
+        self.core = self.rim = None
         if insert_hu is not None:
-            it = max(1, int(round(insert_dilate_mm / spacing_mm)))
-            m = binary_dilation(self.v >= insert_hu, iterations=it)
-            self.v[m] = np.percentile(self.v[::4, ::4, ::4], 2)
-            self.mask = binary_dilation(m, iterations=max(1, int(round(0.5 / spacing_mm)))).astype(np.uint8)
+            # An insert (e.g. a catheter) lies inside the lumen, so it counts as lumen. `core` is the insert itself,
+            # closed so that a hollow catheter's bore is included; `rim` adds its blurred edge (about one voxel).
+            box = np.ones((3, 3, 3), bool)
+            core = binary_closing(self.v >= insert_hu, structure=box, iterations=max(1, int(round(0.8 / spacing_mm))))
+            self.core = core.astype(np.float32)
+            self.rim = binary_dilation(core, structure=box, iterations=max(1, int(round(0.5 / spacing_mm)))).astype(np.float32)
 
     def _ijk(self, X):
         return X @ self.M[:3, :3].T + self.M[:3, 3]
@@ -132,14 +134,89 @@ class CTVolume:
         ijk = self._ijk(X)
         return map_coordinates(self.v, [ijk[..., 2], ijk[..., 1], ijk[..., 0]], order=1, cval=np.nan)
 
-    def in_insert(self, X):
-        if self.mask is None: return np.zeros(len(X), bool)
+    def in_insert(self, X, rim=True):
+        m = self.rim if rim else self.core
+        if m is None: return np.zeros(X.shape[:-1], bool)
         ijk = self._ijk(X)
-        return map_coordinates(self.mask, [ijk[..., 2], ijk[..., 1], ijk[..., 0]], order=0, cval=0) > 0
+        return map_coordinates(m, [ijk[..., 2], ijk[..., 1], ijk[..., 0]], order=1, cval=0) > 0.5
 
 
 # ----------------------------------------------------------------------------- printed lumen from CT
+def lumen_section_insert(ct, c, u, v, r_max):
+    """Lumen contour when an insert (catheter) is in the lumen. Lumen = air or insert; the wall starts at the first
+    stretch of at least WALL_RUN mm that is neither. Coming from air, the edge is the usual half-maximum between air
+    and wall; where the insert touches the wall, the edge is the insert's own outer surface (half-maximum between
+    insert and wall). Returns radii, air level, and which rays ended on insert contact."""
+    r = np.arange(0, r_max, DR); n_run = int(WALL_RUN / DR)
+    dirs = np.cos(ANG)[:, None] * u + np.sin(ANG)[:, None] * v
+    X = c + r[None, :, None] * dirs[:, None, :]
+    f = ct.sample(X); rim = ct.in_insert(X); core = ct.in_insert(X, rim=False)
+    L = np.nanpercentile(f[~rim], 2) if (~rim).any() else np.nanpercentile(f, 2)
+    solid = f[~rim & (f > L + MIN_CONTRAST)]
+    rad = np.full(N_RAYS, np.nan); contact = np.zeros(N_RAYS, bool); through = np.zeros(N_RAYS, bool)
+    if solid.size < 20: return rad, L, contact, through
+    Wref = np.median(solid); air_thr = (L + Wref) / 2
+    lumen = rim | (f < air_thr)
+    for k in range(N_RAYS):
+        wall = ~lumen[k] & np.isfinite(f[k])
+        run = np.convolve(wall, np.ones(n_run), "valid") == n_run       # run[i]: wall from i to i + n_run
+        if not run.any(): continue
+        i0 = int(np.argmax(run))
+        if i0 == 0: continue
+        through[k] = rim[k, :i0].any()
+        fk = f[k]; back = max(0, i0 - int(1.0 / DR))
+        cores = np.nonzero(core[k, back:i0])[0]                       # air between the insert and the wall?
+        gap = (fk[back + cores[-1]:i0] < air_thr).any() if len(cores) else True
+        if rim[k, i0 - 1] and not gap:                                # insert touching the wall
+            Wk = np.median(fk[i0 + int(0.3 / DR):i0 + n_run]); Tk = np.nanmax(fk[back:i0 + 1])
+            if Tk - Wk < MIN_CONTRAST: continue
+            thr = (Tk + Wk) / 2; j = np.nonzero(fk[back:i0 + n_run] >= thr)[0]
+            if not len(j): continue
+            j = back + j[-1]
+            rad[k] = r[j] + DR * (fk[j] - thr) / max(fk[j] - fk[j + 1], 1e-6) if j + 1 < len(r) else r[j]
+            contact[k] = True
+        else:                                                         # air to wall
+            Wk = np.nanmax(np.where(rim[k, i0:i0 + int(WALL_SEARCH / DR)], -np.inf, fk[i0:i0 + int(WALL_SEARCH / DR)]))
+            if Wk - L < MIN_CONTRAST: continue
+            thr = (L + Wk) / 2; a = np.nonzero(fk[back:i0 + n_run] < thr)[0]
+            if not len(a): continue
+            j = back + a[-1]                                          # last sample below the half-maximum
+            if j + 1 >= len(r): continue
+            rad[k] = r[j] + DR * (thr - fk[j]) / max(fk[j + 1] - fk[j], 1e-6)
+    if np.isfinite(rad).sum() > N_RAYS / 2:
+        med = nan_median_filter(rad, 7, wrap=True)
+        rad[np.abs(rad - med) > np.maximum(0.5, 0.15 * med)] = np.nan
+    # the caller treats a centre above (returned level + MIN_CONTRAST / 2) as "in the wall"; with thin slivers of air
+    # beside an insert the right cut-off is the air/wall half-maximum, so return the level that gives exactly that
+    return rad, air_thr - MIN_CONTRAST / 2, contact, through
+
+
+def hull_radii(rad):
+    """Radii of the convex outline of the valid edge points, along the ray directions. Used where an insert lies
+    against the wall: the lumen is convex, but the sliver of air between insert and wall is too thin to resolve and
+    would otherwise leave notches in the contour."""
+    from scipy.spatial import ConvexHull
+    ok = np.isfinite(rad)
+    if ok.sum() < 8: return None
+    pts = np.c_[rad[ok] * np.cos(ANG[ok]), rad[ok] * np.sin(ANG[ok])]
+    try: H = pts[ConvexHull(pts).vertices]
+    except Exception: return None
+    a, b = H, np.roll(H, -1, axis=0); e = b - a
+    out = np.full(N_RAYS, np.nan)
+    for k in range(N_RAYS):                                    # ray from the origin against each hull edge
+        d = np.array([np.cos(ANG[k]), np.sin(ANG[k])])
+        den = d[0] * e[:, 1] - d[1] * e[:, 0]
+        with np.errstate(divide="ignore", invalid="ignore"):
+            t = (a[:, 0] * e[:, 1] - a[:, 1] * e[:, 0]) / den
+            w = (a[:, 0] * d[1] - a[:, 1] * d[0]) / den
+        hit = (np.abs(den) > 1e-12) & (t > 0) & (w >= -1e-9) & (w <= 1 + 1e-9)
+        if hit.any(): out[k] = t[hit].max()
+    return out if np.isfinite(out).all() else None
+
+
 def lumen_section(ct, c, u, v, r_max):
+    if ct.rim is not None: return lumen_section_insert(ct, c, u, v, r_max)
+    through = np.zeros(N_RAYS, bool)
     r = np.arange(0, r_max, DR)
     dirs = np.cos(ANG)[:, None] * u + np.sin(ANG)[:, None] * v
     f = ct.sample(c + r[None, :, None] * dirs[:, None, :])
@@ -153,13 +230,11 @@ def lumen_section(ct, c, u, v, r_max):
         thr = (L + W) / 2; i = np.nonzero(fk >= thr)[0][0]
         if i == 0: continue
         rad[k] = r[i - 1] + DR * (thr - fk[i - 1]) / (fk[i] - fk[i - 1])
-    ins = np.zeros(N_RAYS, bool); hit = np.isfinite(rad)
-    if hit.any(): ins[np.nonzero(hit)[0][ct.in_insert(c + rad[hit, None] * dirs[hit])]] = True
-    rad[ins] = np.nan
+    ins = np.zeros(N_RAYS, bool)
     if np.isfinite(rad).sum() > N_RAYS / 2:      # drop spikes against the neighbouring rays
         med = nan_median_filter(rad, 7, wrap=True)
         rad[np.abs(rad - med) > np.maximum(0.5, 0.15 * med)] = np.nan
-    return rad, L, ins
+    return rad, L, ins, through
 
 
 def reseed(ct, c, u, v, r_max, px=0.1):
@@ -212,21 +287,23 @@ def measure_print_path(ct, P0, step, r_search, max_diameter=None):
     for it in range(PASSES):
         T = tangents(C, step); U, V = frames(T)
         newC, D = C.copy(), np.full(n, np.nan); bad, insert = np.ones(n), np.zeros(n)
-        rings = np.full((n, N_RAYS, 3), np.nan); lost = np.zeros(n, bool)
+        rings = np.full((n, N_RAYS, 3), np.nan); lost = np.zeros(n, bool); valid = np.zeros((n, N_RAYS), bool)
         for i in range(n):
-            rad, L, ins = lumen_section(ct, C[i], U[i], V[i], rmax[i])
-            if ct.sample(C[i][None])[0] > L + MIN_CONTRAST / 2:
+            rad, L, ins, thru = lumen_section(ct, C[i], U[i], V[i], rmax[i])
+            if ct.sample(C[i][None])[0] > L + MIN_CONTRAST / 2 and not ct.in_insert(C[i][None])[0]:
                 c2 = reseed(ct, C[i], U[i], V[i], min(rmax[i], lim[i] + 1.0))
                 if c2 is None or np.linalg.norm(c2 - C0[i]) > lim[i]:
                     lost[i] = True; newC[i] = C0[i]; continue
-                C[i] = c2; rad, _, ins = lumen_section(ct, C[i], U[i], V[i], rmax[i])
-            bad[i] = np.mean(~np.isfinite(rad) & ~ins); insert[i] = np.mean(ins)
-            rf = fill_rays_circle(rad) if ins.any() else fill_rays(rad)
+                C[i] = c2; rad, _, ins, thru = lumen_section(ct, C[i], U[i], V[i], rmax[i])
+            bad[i] = np.mean(~np.isfinite(rad)); insert[i] = np.mean(ins)
+            valid[i] = np.isfinite(rad)
+            rf = (hull_radii(rad) if thru.mean() > 0.05 else None)
+            if rf is None: rf = fill_rays(rad)
             if rf is None: continue
             xy = np.c_[rf * np.cos(ANG), rf * np.sin(ANG)]; A, cen = polygon(xy)
             ci = C[i] + cen[0] * U[i] + cen[1] * V[i]
             if np.linalg.norm(ci - C0[i]) > lim[i]:                 # drifted towards another lumen
-                lost[i] = True; newC[i] = C0[i]; bad[i] = 1.0; continue
+                lost[i] = True; newC[i] = C0[i]; bad[i] = 1.0; valid[i] = False; continue
             D[i] = 2 * np.sqrt(A / np.pi); newC[i] = ci
             rings[i] = C[i] + xy[:, :1] * U[i] + xy[:, 1:] * V[i]
         C = newC
@@ -235,7 +312,7 @@ def measure_print_path(ct, P0, step, r_search, max_diameter=None):
             Rl[~np.isfinite(Rl)] = np.nanmedian(D / 2)
             rmax = np.minimum(r_search, Rl + 2.5)
             lim = np.maximum(MAX_SHIFT_MM, 0.75 * Rl)
-    return dict(s=s, C=C, T=tangents(C, step), D=D, bad=bad, insert=insert, rings=rings, lost=lost)
+    return dict(s=s, C=C, T=tangents(C, step), D=D, bad=bad, insert=insert, rings=rings, lost=lost, valid=valid)
 
 
 # ----------------------------------------------------------------------------- design (original) sections
@@ -316,6 +393,29 @@ def register(wall_pts, design_pts, progress=None):
                       median_wall_distance_mm=float(np.median(tree.query(X @ R.T + t)[0])), wall_within_1mm=f)
 
 
+def wall_offset(P, valid, u, v, tree, Y, N, shift0=None):
+    """Fit  signed distance to design = dR + shift . normal  over the wall points P of one station (design frame).
+    `valid` marks which of the N_RAYS rays the points belong to. Returns (dR, |shift|, rms) or None if the wall
+    seen is too little or too one-sided to separate a radius error from a sideways shift."""
+    if len(P) < 0.4 * N_RAYS: return None
+    shift = np.zeros(3) if shift0 is None else np.asarray(shift0, float).copy()
+    for _ in range(4):                                    # re-pair after removing the sideways shift found so far
+        Q = P - shift; d, j = tree.query(Q); keep = d < 2.5
+        if keep.sum() < 0.4 * N_RAYS: return None
+        n = N[j[keep]]; sd = ((Q[keep] - Y[j[keep]]) * n).sum(1)
+        A = np.c_[np.ones(keep.sum()), n @ u, n @ v]
+        x, *_ = np.linalg.lstsq(A, sd, rcond=None)
+        shift = shift + x[1] * u + x[2] * v
+    seen = np.zeros(N_RAYS, bool); seen[np.nonzero(valid)[0][keep]] = True
+    gap = 0; run = 0
+    for b in np.r_[seen, seen]:                           # longest stretch of rays without wall (circular)
+        run = 0 if b else run + 1; gap = max(gap, run)
+    if gap > N_RAYS * 200 / 360: return None
+    rms = float(np.sqrt(np.mean((A @ x - sd) ** 2)))
+    if rms > 0.5: return None
+    return float(x[0]), float(np.linalg.norm(shift)), rms
+
+
 # ----------------------------------------------------------------------------- whole module
 def run(ct, centerlines, design_poly, params=None, progress=None):
     """
@@ -378,7 +478,23 @@ def run(ct, centerlines, design_poly, params=None, progress=None):
             junc = np.convolve(junc, np.ones(2 * int(p["junction_margin_mm"] / step) + 1), "same") > 0
             flag[junc & (flag == "")] = "junction"
         sh = (shared != "") & (flag == ""); flag[sh] = shared[sh]
-        r["flag"] = flag
+        r["flag"] = flag; r["junc"] = junc
+
+    # Junction stations that can still be measured: the branch passes a side branch's opening (or has just left its
+    # parent). Stations at the very start or end of a branch that still lie inside another branch's lumen are not
+    # used: that wall belongs to the other branch and is measured there.
+    for name, r in pr.items():
+        n_st = len(r["s"]); inside = np.zeros(n_st, bool)
+        for other, o in pr.items():
+            if other == name: continue
+            good = np.isfinite(o["D"]) & ~o["junc"] & np.isin(o["flag"], ["", "junction"])
+            if good.sum() < 3: continue
+            Ro = np.interp(np.arange(len(o["s"])), np.nonzero(good)[0], o["D"][good] / 2)
+            d, j = cKDTree(o["C"]).query(r["C"])
+            from_end = np.minimum(r["s"], r["s"][-1] - r["s"])
+            inside |= (d < Ro[j]) & (from_end <= Ro[j] + 2.0)
+        r["jcand"] = (r["junc"] & ~inside & ~r["lost"] & (r["valid"].mean(1) >= 0.4)
+                      & np.isin(r["flag"], ["junction", "open", "next to unmeasurable section"]))
 
     say(0.6, "Registering print to design")
     wall = np.vstack([r["rings"][np.isin(r["flag"], ["", "junction", "insert contact"])].reshape(-1, 3) for r in pr.values()])
@@ -386,45 +502,118 @@ def run(ct, centerlines, design_poly, params=None, progress=None):
     design_pts = vtk_to_numpy(design_poly.GetPoints().GetData()).astype(float)
     R, t, reg = register(wall, design_pts, lambda f: say(0.6 + 0.2 * f, "Registering print to design"))
 
+    nf = vtk.vtkPolyDataNormals(); nf.SetInputData(design_poly); nf.SplittingOff(); nf.ConsistencyOn()
+    nf.AutoOrientNormalsOn(); nf.ComputePointNormalsOn(); nf.Update()
+    d_pts = vtk_to_numpy(nf.GetOutput().GetPoints().GetData()).astype(float)
+    d_nrm = vtk_to_numpy(nf.GetOutput().GetPointData().GetNormals()).astype(float); d_tree = cKDTree(d_pts)
+
     stations, paths = [], {}
     for k, name in enumerate(names):
         say(0.8 + 0.2 * k / len(names), f"Sectioning design: {name}")
         r = pr[name]; use = r["flag"] == ""
-        Cp, Tp = r["C"] @ R.T + t, r["T"] @ R.T
+        Cp, Tp = r["C"] @ R.T + t, r["T"] @ R.T               # the one rigid-body registration of the whole vessel
         sub = crop(design_poly, Cp, 2 * r["dmax"])
-        Co, _, _ = measure_design_path(sub, Cp, Tp, r["dmax"], step, passes=1)
-        Rp, tp = np.eye(3), np.zeros(3); okp = use & np.isfinite(Co).all(1)
-        if (okp.sum() - 1) * step >= p["min_path_fit_mm"]:
-            Rp, tp = icp(Cp[okp], densify(Co[okp]), iters=50, keep=0.8)
-        Cq = Cp @ Rp.T + tp
-        Co, Do, loops = measure_design_path(sub, Cq, Tp @ Rp.T, r["dmax"], step)
-        mismatch = ~(np.linalg.norm(Co - Cq, axis=1) <= p["mismatch_mm"])
+        Co, Do, loops = measure_design_path(sub, Cp, Tp, r["dmax"], step)
+        mismatch = ~(np.linalg.norm(Co - Cp, axis=1) <= p["mismatch_mm"])
         ok = use & np.isfinite(Do) & ~mismatch
-        dev_mod, dev_path = np.full(len(Cp), np.nan), np.full(len(Cp), np.nan)
-        if ok.sum() > 5:
-            dense = densify(Co[ok]); dev_mod[ok] = cKDTree(dense).query(Cp[ok])[0]
-            if (ok.sum() - 1) * step >= p["min_path_fit_mm"]:
-                Rp, tp = icp(Cp[ok], dense, Rp, tp, iters=50, keep=1.0)
-                dev_path[ok] = cKDTree(dense).query(Cp[ok] @ Rp.T + tp)[0]
-        mismatch |= dev_path > p["mismatch_mm"]
+        dev = np.full(len(Cp), np.nan)
+        if ok.sum() > 5: dev[ok] = cKDTree(densify(Co[ok])).query(Cp[ok])[0]
         small = Do < (p["min_diameter_mm"] or 0)
         trend = nan_median_filter(Do, 2 * int(3 / step) + 1)
         artefact = np.abs(Do - trend) > np.maximum(0.3, 0.1 * trend)
-        ok &= ~mismatch & ~small & ~artefact
-        Rc, tc = Rp @ R, Rp @ t + tp                      # print -> design for this vessel
+        ok &= ~small & ~artefact
+        # Wall offset: signed distance from the printed wall points to the design surface, fitted per station as
+        # offset = dR + shift . normal. dR is the radius error (2 dR is a diameter error) and |shift| the distance
+        # between the printed and design centres there. It needs only part of the wall, so it also works where the
+        # cross-section is open towards a side branch.
+        # The two estimates are independent, so ordinary stations where they disagree by more than 0.3 mm are
+        # treated as matched to the wrong place in the design and left out.
+        Uc, Vc = frames(Tp); wall = [None] * len(Cp)
+        off = Cp - Co; idx = np.arange(len(Cp))                       # starting guess for the sideways shift
+        if ok.sum() >= 2: off = np.c_[[np.interp(idx, idx[ok], (Cp - Co)[ok, c]) for c in range(3)]].T
+        for i in np.nonzero(ok | r["jcand"])[0]:
+            wall[i] = wall_offset(r["rings"][i][r["valid"][i]] @ R.T + t, r["valid"][i], Uc[i], Vc[i], d_tree, d_pts, d_nrm,
+                                  off[i] if np.isfinite(off[i]).all() else None)
+        agree = np.array([w is not None and abs(2 * w[0] - (r["D"][i] - Do[i])) <= 0.3 for i, w in enumerate(wall)])
+        mismatch |= ok & ~agree; ok &= agree
+        Dprint, Dref, at_j = r["D"].copy(), Do.copy(), np.zeros(len(Cp), bool)
+        if ok.sum() >= 2:
+            Dint = np.interp(np.arange(len(Cp)), np.nonzero(ok)[0], Do[ok])
+            for i in np.nonzero(r["jcand"] & ~ok)[0]:
+                if wall[i] is None or wall[i][1] > p["mismatch_mm"] or wall[i][2] > 0.25: continue   # poor fit: skip
+                Dref[i] = Dint[i]; Dprint[i] = Dint[i] + 2 * wall[i][0]; dev[i] = wall[i][1]
+                at_j[i] = True; ok[i] = True
         for i in range(len(Cp)):
-            why = r["flag"][i] or ("no design section" if not np.isfinite(Do[i]) else "design mismatch" if mismatch[i]
-                                   else "below CT resolution" if small[i] else "design artefact" if artefact[i] else "")
-            stations.append(dict(branch=name, station=i, s_mm=float(r["s"][i]), excluded=why,
-                                 D_print_mm=float(r["D"][i]), D_design_mm=float(Do[i]), dD_mm=float(r["D"][i] - Do[i]),
-                                 dD_pct=float(100 * (r["D"][i] - Do[i]) / Do[i]) if Do[i] > 0 else np.nan,
-                                 cl_dev_mm=float(dev_path[i]), cl_dev_whole_vessel_mm=float(dev_mod[i]),
+            why = "" if at_j[i] else (r["flag"][i] or ("no design section" if not np.isfinite(Do[i]) else "design mismatch" if mismatch[i]
+                                      else "below CT resolution" if small[i] else "design artefact" if artefact[i] else ""))
+            stations.append(dict(branch=name, station=i, s_mm=float(r["s"][i]), excluded=why, at_junction=int(at_j[i]), edited=0,
+                                 D_print_mm=float(Dprint[i]), D_design_mm=float(Dref[i]), dD_mm=float(Dprint[i] - Dref[i]),
+                                 dD_pct=float(100 * (Dprint[i] - Dref[i]) / Dref[i]) if Dref[i] > 0 else np.nan,
+                                 cl_dev_mm=float(dev[i]),
                                  insert_hidden_frac=float(r["insert"][i]),
                                  x=float(r["C"][i, 0]), y=float(r["C"][i, 1]), z=float(r["C"][i, 2])))
-        paths[name] = dict(s=r["s"], C=r["C"], T=r["T"], rings=r["rings"], ok=ok,
-                           design_loops_in_ct=[None if L is None else (L - tc) @ Rc for L in loops])
+        paths[name] = dict(s=r["s"], C=r["C"], T=r["T"], rings=r["rings"], ok=ok, valid=r["valid"], at_junction=at_j,
+                           D=r["D"], wall=wall, Co=Co, Do=Dref,
+                           design_loops_in_ct=[None if L is None else (L - t) @ R for L in loops])
     say(1.0, "Done")
     return dict(stations=stations, paths=paths, R=R, t=t, registration=reg)
+
+
+def lumen_surface(ct, res):
+    """Printed lumen as one continuous surface (junctions included), segmented in 3D from the CT.
+    Air (or insert) voxels below the lumen/wall half-maximum are kept if they lie within the local lumen radius
+    + 1 mm of a measured centerline and are connected to it; the surface is the half-maximum iso-surface, smoothed.
+    Each vertex carries the diameter error and centerline error of the nearest included station (NaN if none is
+    near), so the surface can be coloured by either. Returns vtkPolyData in the CT's world frame."""
+    from vtk.util.numpy_support import numpy_to_vtk
+    C, Rl, Tout, isend, okc, vd, vc = [], [], [], [], [], [], []
+    for name, p in res["paths"].items():
+        rows = [st for st in res["stations"] if st["branch"] == name]; n = len(p["s"])
+        r = nan_median_filter(p["D"] / 2, 11); r[~np.isfinite(r)] = np.nanmedian(p["D"] / 2) if np.isfinite(p["D"]).any() else 2.0
+        e = np.zeros(n, bool); e[[0, -1]] = True; to = p["T"].copy(); to[0] = -to[0]
+        C.append(p["C"]); Rl.append(r); Tout.append(to); isend.append(e)
+        okc.append(np.array([st["excluded"] == "" for st in rows]))
+        vd.append(np.array([st["dD_mm"] for st in rows])); vc.append(np.array([st["cl_dev_mm"] for st in rows]))
+    C, Rl, Tout, isend, okc, vd, vc = (np.concatenate(a) for a in (C, Rl, Tout, isend, okc, vd, vc))
+    Minv = np.linalg.inv(ct.M); sp = np.linalg.norm(Minv[:3, :3], axis=0).min()
+    ijk = C @ ct.M[:3, :3].T + ct.M[:3, 3]; pad = int(np.ceil((Rl.max() + 3.0) / sp))
+    shape = np.array(ct.v.shape)[::-1]                                  # (ni, nj, nk)
+    lo = np.clip(np.floor(ijk.min(0)).astype(int) - pad, 0, shape - 1); hi = np.clip(np.ceil(ijk.max(0)).astype(int) + pad + 1, 1, shape)
+    sub = ct.v[lo[2]:hi[2], lo[1]:hi[1], lo[0]:hi[0]].astype(np.float32).copy()
+    L = float(np.percentile(sub, 2))
+    if ct.rim is not None: sub[ct.rim[lo[2]:hi[2], lo[1]:hi[1], lo[0]:hi[0]] > 0.5] = L
+    rings = np.vstack([p["rings"][p["ok"]] for p in res["paths"].values()]); cen = np.vstack([np.repeat(p["C"][p["ok"]], N_RAYS, 0) for p in res["paths"].values()])
+    out = rings.reshape(-1, 3) - cen; nrm = np.linalg.norm(out, axis=1, keepdims=True)
+    good = np.isfinite(out).all(1) & (nrm[:, 0] > 0)
+    W = float(np.nanmedian(ct.sample((rings.reshape(-1, 3) + 0.7 * out / nrm)[good]))) if good.sum() > 50 else L + 800
+    thr = (L + W) / 2
+    air = sub < thr; kji = np.argwhere(air)
+    X = (kji[:, ::-1] + lo) @ Minv[:3, :3].T + Minv[:3, 3]
+    d, j = cKDTree(C).query(X); keep = d < Rl[j] + 1.0
+    beyond = isend[j] & (((X - C[j]) * Tout[j]).sum(1) > 0.5)           # past the end of a centerline
+    keep &= ~beyond
+    mask = np.zeros(sub.shape, bool); mask[tuple(kji[keep].T)] = True
+    lab, _ = label(mask)
+    seeds = np.round(ijk).astype(int) - lo; inb = ((seeds >= 0) & (seeds < np.array(sub.shape)[::-1])).all(1)
+    ids = np.unique(lab[seeds[inb, 2], seeds[inb, 1], seeds[inb, 0]]); ids = ids[ids > 0]
+    comp = np.isin(lab, ids); shell = binary_dilation(comp, iterations=2)
+    vol = sub.copy(); high = thr + 400.0
+    vol[~shell] = high; vol[shell & air & ~comp] = high
+    img = vtk.vtkImageData(); img.SetDimensions(*vol.shape[::-1]); img.SetOrigin(*lo.astype(float)); img.SetSpacing(1, 1, 1)
+    arr = numpy_to_vtk(vol.ravel(), deep=True); arr.SetName("HU"); img.GetPointData().SetScalars(arr)
+    fe = vtk.vtkFlyingEdges3D(); fe.SetInputData(img); fe.SetValue(0, thr); fe.ComputeNormalsOff()
+    tr = vtk.vtkTransform(); tr.SetMatrix(Minv.ravel().tolist())
+    tf = vtk.vtkTransformPolyDataFilter(); tf.SetTransform(tr); tf.SetInputConnection(fe.GetOutputPort())
+    sm = vtk.vtkWindowedSincPolyDataFilter(); sm.SetInputConnection(tf.GetOutputPort()); sm.SetNumberOfIterations(20)
+    sm.SetPassBand(0.1); sm.BoundarySmoothingOff(); sm.NonManifoldSmoothingOn(); sm.NormalizeCoordinatesOn()
+    nf = vtk.vtkPolyDataNormals(); nf.SetInputConnection(sm.GetOutputPort()); nf.SplittingOff(); nf.AutoOrientNormalsOn(); nf.Update()
+    poly = vtk.vtkPolyData(); poly.DeepCopy(nf.GetOutput())
+    if poly.GetNumberOfPoints() and okc.any():
+        V = vtk_to_numpy(poly.GetPoints().GetData()).astype(float)
+        d, j = cKDTree(C[okc]).query(V); near = d < 1.5 * Rl[okc][j] + 1.5
+        for key, vals in (("dD_mm", vd), ("cl_dev_mm", vc)):
+            a = numpy_to_vtk(np.where(near, vals[okc][j], np.nan), deep=True); a.SetName(key); poly.GetPointData().AddArray(a)
+    return poly
 
 
 def summarise(stations, step):
