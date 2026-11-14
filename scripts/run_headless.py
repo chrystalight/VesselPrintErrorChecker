@@ -49,8 +49,8 @@ def run(name, ct_dir, design, paths_dir, mm_per_unit, insert_hu, out, params, ex
     write_csv(summ, os.path.join(out, f"{name}_summary.csv"))
     print(f"\n   registration: " + ", ".join(f"{k} {v:.2f}" for k, v in res["registration"].items()))
     for r in summ:
-        print(f"   {r['vessel']:20s} n={r['n_stations']:4d}  dD {r['dD_mean_mm']:+.2f} ± {r['dD_sd_mm']:.2f} mm ({r['dD_mean_pct']:+.1f}%)  "
-              f"centerline {r['cl_module_mean_mm']:.2f} (module) / {r['cl_vessel_mean_mm']:.2f} (vessel) mm")
+        print(f"   {r['branch']:20s} n={r['n_stations']:4d}  diameter error {r['dD_mean_mm']:+.2f} ± {r['dD_sd_mm']:.2f} mm "
+              f"({r['dD_mean_pct']:+.1f}%)  centerline error {r['cl_dev_mean_mm']:.2f} mm")
 
 
 if __name__ == "__main__":

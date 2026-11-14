@@ -40,8 +40,8 @@ LAYOUT_3D_XML = LAYOUT_XML.replace(
     '<layout type="horizontal" split="true"><item><view class="vtkMRMLSliceNode" singletontag="Red">', 1).replace(
     '    </view>\n   </item>\n   <item splitSize="300">',
     '    </view></item><item><view class="vtkMRMLViewNode" singletontag="1"><property name="viewlabel" action="default">1</property></view></item></layout>\n   </item>\n   <item splitSize="300">', 1)
-COLOR_BY = [("None", None), ("Diameter error", "dD_mm"), ("Centerline error (whole-module fit)", "cl_dev_module_mm"),
-            ("Centerline error (per-vessel fit)", "cl_dev_vessel_mm")]
+COLOR_BY = [("None", None), ("Diameter error", "dD_mm"), ("Centerline error", "cl_dev_mm")]
+LEGEND_TITLE = {"dD_mm": "Diameter error (mm)", "cl_dev_mm": "Centerline error (mm)"}
 COLORS = [(0.16, 0.47, 0.84), (0.77, 0.43, 0.11), (0.09, 0.57, 0.50), (0.42, 0.31, 0.77), (0.80, 0.25, 0.45),
           (0.45, 0.60, 0.15), (0.20, 0.65, 0.85), (0.55, 0.40, 0.25)]
 
@@ -95,7 +95,7 @@ class VesselPrintErrorCheckerWidget(ScriptedLoadableModuleWidget):
         form.addRow(row)
         self.excludeEdit = qt.QLineEdit(); self.excludeEdit.placeholderText = "optional, e.g.  Aorta: 0-60; ICA: 5-12"
         self.excludeEdit.setToolTip("Stretches of a vessel to leave out, in mm along its centerline (e.g. a section that held "
-                                    "water during scanning). Format: Vessel: from-to, from-to; Vessel2: from-to")
+                                    "water during scanning). Format: Branch: from-to, from-to; Branch2: from-to")
         form.addRow("Exclude ranges (mm):", self.excludeEdit)
 
         # --- parameters
@@ -107,7 +107,7 @@ class VesselPrintErrorCheckerWidget(ScriptedLoadableModuleWidget):
         self.minDiam = self._spin(0, 10, d["min_diameter_mm"], " mm", "Design diameters below this are excluded as below CT resolution (0 = keep all)")
         self.junction = self._spin(0, 20, d["junction_margin_mm"], " mm", "Extra exclusion either side of a vessel junction")
         self.trim = self._spin(0, 20, d["end_trim_mm"], " mm", "Ignore this much at each end of a centerline")
-        self.mismatch = self._spin(0.5, 20, d["mismatch_mm"], " mm", "Print and design centres further apart than this (after the per-vessel fit) are not compared")
+        self.mismatch = self._spin(0.5, 20, d["mismatch_mm"], " mm", "Print and design centres further apart than this (after aligning the branch) are not compared")
         self.insertCheck = qt.QCheckBox("Treat bright insert as lumen, HU ≥")
         self.insertHU = self._spin(100, 5000, 600, "", "Voxels at or above this value are an insert (e.g. a tube) inside the lumen")
         irow = qt.QHBoxLayout(); irow.addWidget(self.insertCheck); irow.addWidget(self.insertHU)
@@ -126,12 +126,12 @@ class VesselPrintErrorCheckerWidget(ScriptedLoadableModuleWidget):
         # --- inspect
         ibox = ctk.ctkCollapsibleButton(); ibox.text = "Inspect cross-section"; self.layout.addWidget(ibox)
         iform = qt.QFormLayout(ibox)
-        self.vesselCombo = qt.QComboBox(); iform.addRow("Vessel:", self.vesselCombo)
+        self.vesselCombo = qt.QComboBox(); iform.addRow("Branch:", self.vesselCombo)
         self.stationSlider = ctk.ctkSliderWidget(); self.stationSlider.decimals = 0; self.stationSlider.singleStep = 1
         self.stationSlider.minimum = 0; self.stationSlider.maximum = 0
         iform.addRow("Station:", self.stationSlider)
-        self.info = qt.QLabel("Run a measurement, then pick a vessel and station here, or click a point in either plot. "
-                              "The plots show the selected vessel; the grey line marks the inspected station.")
+        self.info = qt.QLabel("Run a measurement, then pick a branch and station here, or click a point in either plot. "
+                              "The plots show the selected branch; the grey line marks the inspected station.")
         self.info.wordWrap = True; iform.addRow(self.info)
         legend = qt.QLabel("<span style='color:#22d3ee'>■</span> printed lumen &nbsp; "
                            "<span style='color:#f59e0b'>■</span> design lumen (mapped into the CT)")
@@ -222,12 +222,12 @@ class VesselPrintErrorCheckerWidget(ScriptedLoadableModuleWidget):
 
     def showResults(self):
         lg = self.logic; reg = lg.result["registration"]
-        all_ = [r for r in lg.summary if r["vessel"] == "ALL"][0]
+        all_ = [r for r in lg.summary if r["branch"] == "ALL"][0]
         self.status.text = (f"Registration: {reg['rotation_deg']:.1f}°, median wall distance {reg['median_wall_distance_mm']:.2f} mm, "
                             f"{100 * reg['wall_within_1mm']:.0f}% of wall within 1 mm.<br>"
-                            f"All vessels: diameter error {all_['dD_mean_mm']:+.2f} ± {all_['dD_sd_mm']:.2f} mm "
-                            f"({all_['dD_mean_pct']:+.1f}%), centerline error {all_['cl_module_mean_mm']:.2f} mm (module fit), "
-                            f"{all_['cl_vessel_mean_mm']:.2f} mm (per-vessel fit), n = {all_['n_stations']} stations.")
+                            f"Whole vessel (all branches): diameter error {all_['dD_mean_mm']:+.2f} ± {all_['dD_sd_mm']:.2f} mm "
+                            f"({all_['dD_mean_pct']:+.1f}%), centerline error {all_['cl_dev_mean_mm']:.2f} mm, "
+                            f"n = {all_['n_stations']} stations.")
         lg.showLayout(self.show3D.checked)
         lg.build3D(); lg.fit3D()
         lg.colour3D(COLOR_BY[self.colorBy.currentIndex][1], self.colorMax.value)
@@ -272,8 +272,7 @@ class VesselPrintErrorCheckerWidget(ScriptedLoadableModuleWidget):
         self.info.text = (f"<b>{name}</b>, s = {st['s_mm']:.1f} mm &nbsp; ({st['excluded'] or 'included'})<br>"
                           f"Diameter: printed {f(st['D_print_mm'], '.2f')} mm, design {f(st['D_design_mm'], '.2f')} mm, "
                           f"error {f(st['dD_mm'], '+.2f')} mm ({f(st['dD_pct'], '+.1f')}%)<br>"
-                          f"Centerline error: {f(st['cl_dev_module_mm'], '.2f')} mm (module fit), "
-                          f"{f(st['cl_dev_vessel_mm'], '.2f')} mm (per-vessel fit)")
+                          f"Centerline error: {f(st['cl_dev_mm'], '.2f')} mm")
 
     def on3DOptions(self, *args):
         if self.logic.result is None: return
@@ -411,7 +410,7 @@ class VesselPrintErrorCheckerLogic(ScriptedLoadableModuleLogic):
         for ch in (chartD, chartC):
             ch.RemoveAllPlotSeriesNodeIDs(); ch.SetXAxisTitle("distance along centerline (mm)")
         chartD.SetYAxisTitle("print \u2212 design (mm)"); chartD.SetLegendVisibility(False)
-        chartC.SetYAxisTitle("distance (mm)"); chartC.SetLegendVisibility(True)
+        chartC.SetYAxisTitle("print to design (mm)"); chartC.SetLegendVisibility(False)
 
         def series(name, table, x, y, color, dashed=False, marker=True, width=2):
             sn = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLPlotSeriesNode", name); sn.SetHideFromEditors(True)
@@ -423,16 +422,15 @@ class VesselPrintErrorCheckerLogic(ScriptedLoadableModuleLogic):
             sn.SetLineWidth(width); sn.SetColor(*color); self._plotNodes.append(sn); return sn
 
         for name, p in self.result["paths"].items():
-            rows = [st for st in self.result["stations"] if st["path"] == name]; ok = p["ok"]
+            rows = [st for st in self.result["stations"] if st["branch"] == name]; ok = p["ok"]
             masked = lambda key: [r[key] if ok[i] else np.nan for i, r in enumerate(rows)]
-            t = self._table(f"VPE plot {name}", [dict(s_mm=r["s_mm"], dD_mm=a, cl_module_mm=b, cl_vessel_mm=c) for r, a, b, c in
-                                                  zip(rows, masked("dD_mm"), masked("cl_dev_module_mm"), masked("cl_dev_vessel_mm"))])
+            t = self._table(f"VPE plot {name}", [dict(s_mm=r["s_mm"], dD_mm=a, cl_mm=b) for r, a, b in
+                                                  zip(rows, masked("dD_mm"), masked("cl_dev_mm"))])
             t.SetHideFromEditors(True)
             sD = series("diameter error", t, "s_mm", "dD_mm", (0.16, 0.47, 0.84))
-            sV = series("per-vessel fit (shape only)", t, "s_mm", "cl_vessel_mm", (0.16, 0.47, 0.84))
-            sM = series("whole-module fit (includes bending)", t, "s_mm", "cl_module_mm", (0.80, 0.45, 0.12), dashed=True, marker=False)
-            for sn in (sD, sV, sM): self.seriesToPath[sn.GetID()] = name
-            self.vesselSeries[name] = (sD, sV, sM, rows, ok)
+            sC = series("centerline error", t, "s_mm", "cl_mm", (0.80, 0.45, 0.12))
+            for sn in (sD, sC): self.seriesToPath[sn.GetID()] = name
+            self.vesselSeries[name] = (sD, sC, rows, ok)
         # zero line and station marker, shared by both charts
         self.guideTable = self._table("VPE plot guides", [dict(x=0.0, zero=0.0, yD=0.0, yC=0.0), dict(x=1.0, zero=0.0, yD=0.0, yC=0.0)])
         self.markerTable = self._table("VPE plot marker", [dict(x=0.0, yD=0.0, yC=0.0), dict(x=0.0, yD=0.0, yC=0.0)])
@@ -443,22 +441,24 @@ class VesselPrintErrorCheckerLogic(ScriptedLoadableModuleLogic):
         self.chartD, self.chartC = chartD, chartC
 
     def updatePlots(self, name, i):
-        """Show only vessel `name` in both charts, with a vertical line at station i."""
+        """Show only branch `name` in both charts, with a vertical line at station i."""
         if name not in getattr(self, "vesselSeries", {}): return
-        sD, sV, sM, rows, ok = self.vesselSeries[name]
+        sD, sC, rows, ok = self.vesselSeries[name]
         s_all = np.array([r["s_mm"] for r in rows])
         val = lambda k: np.array([r[k] if ok[j] else np.nan for j, r in enumerate(rows)], float)
-        dD, cv, cm = val("dD_mm"), val("cl_dev_vessel_mm"), val("cl_dev_module_mm")
+        dD, cl = val("dD_mm"), val("cl_dev_mm")
         fin = lambda a: a[np.isfinite(a)]
         lo = min(0.0, *fin(dD)) if fin(dD).size else -1.0; hi = max(0.0, *fin(dD)) if fin(dD).size else 1.0
-        top = max([1e-3] + list(fin(cv)) + list(fin(cm)))
+        top = max([1e-3] + list(fin(cl)))
         if self._plotted != name:
             for ch in (self.chartD, self.chartC): ch.RemoveAllPlotSeriesNodeIDs()
             for sn in (self.zeroSeries, sD, self.markD): self.chartD.AddAndObservePlotSeriesNodeID(sn.GetID())
-            for sn in (self.zeroSeries, sV, sM, self.markC): self.chartC.AddAndObservePlotSeriesNodeID(sn.GetID())
+            for sn in (self.zeroSeries, sC, self.markC): self.chartC.AddAndObservePlotSeriesNodeID(sn.GetID())
             n_ok = int(ok.sum()); m = fin(dD)
             self.chartD.SetTitle(f"{name}: diameter error" + (f"  (mean {m.mean():+.2f} mm, n = {n_ok})" if m.size else "  (no included stations)"))
-            self.chartC.SetTitle(f"{name}: centerline error")
+            c = fin(cl)
+            self.chartC.SetTitle(f"{name}: centerline error" + (f"  (mean {c.mean():.2f} mm)" if c.size else
+                                                                 "  (branch too short to align on its own)"))
             g = self.guideTable.GetTable(); g.SetValue(0, 0, float(s_all[0])); g.SetValue(1, 0, float(s_all[-1])); g.Modified()
             self._plotted = name
         t = self.markerTable.GetTable(); x = float(s_all[i])
@@ -487,7 +487,7 @@ class VesselPrintErrorCheckerLogic(ScriptedLoadableModuleLogic):
     def inspect(self, name, i, follow3D=False):
         """Reorient the Red slice view onto station i of vessel `name` and draw both contours."""
         p = self.result["paths"][name]
-        row = [s for s in self.result["stations"] if s["path"] == name][i]
+        row = [s for s in self.result["stations"] if s["branch"] == name][i]
         c, n = p["C"][i], p["T"][i]
         U, _ = core.frames(p["T"][max(0, i - 1):i + 1]); u = U[-1]
         sn = slicer.mrmlScene.GetNodeByID("vtkMRMLSliceNodeRed")
@@ -520,7 +520,7 @@ class VesselPrintErrorCheckerLogic(ScriptedLoadableModuleLogic):
         keys = [k for _, k in COLOR_BY if k]
         pts, polys, arrays, off = [], [], {k: [] for k in keys}, 0
         for name, p in res["paths"].items():
-            rows = [s for s in res["stations"] if s["path"] == name]
+            rows = [s for s in res["stations"] if s["branch"] == name]
             rings = p["rings"]; good = p["ok"] & np.isfinite(rings).all(axis=(1, 2))
             idx = np.nonzero(good)[0]
             for k in range(len(idx) - 1):
@@ -600,8 +600,7 @@ class VesselPrintErrorCheckerLogic(ScriptedLoadableModuleLogic):
             if old: slicer.mrmlScene.RemoveNode(old)
             if key is not None:
                 legend = cl.AddDefaultColorLegendDisplayNode(m)
-                legend.SetTitleText({"dD_mm": "Diameter error (mm)", "cl_dev_module_mm": "Centerline error, module fit (mm)",
-                                     "cl_dev_vessel_mm": "Centerline error, per-vessel fit (mm)"}[key])
+                legend.SetTitleText(LEGEND_TITLE[key])
                 legend.SetSize(0.12, 0.45); legend.SetPosition(0.98, 0.5)
                 views = slicer.util.getNodesByClass("vtkMRMLViewNode")
                 if views: legend.SetViewNodeIDs([v.GetID() for v in views])

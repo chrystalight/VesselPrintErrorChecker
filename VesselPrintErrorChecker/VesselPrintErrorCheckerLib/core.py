@@ -5,8 +5,11 @@ All geometry is in one world frame (Slicer RAS, mm). The CT is given as a numpy 
 plus its 4x4 world->IJK matrix. Centerlines are (N, 3) point arrays in the same world frame. The design
 (original lumen) is a vtkPolyData in its own frame; it is registered to the print here.
 
-Per station the engine reports the printed and design equivalent diameters (2*sqrt(A/pi)), their difference,
-and the centerline deviation after (a) one rigid fit for the whole module and (b) one rigid fit per vessel.
+Terms: a *vessel* is one connected vessel tree (one CT, one design STL); a *branch* is one centerline in it.
+Per station the engine reports the printed and design equivalent diameters (2*sqrt(A/pi)), their difference, and the
+centerline error: the distance between printed and design centerlines after aligning that branch on its own (rigid).
+The distance after a single alignment of the whole vessel is also kept (cl_dev_whole_vessel_mm) for reference; for
+elastic prints it includes how the soft vessel happened to lie during the scan.
 """
 import numpy as np
 import vtk
@@ -20,12 +23,12 @@ DEFAULTS = dict(
     max_search_radius_mm=12.0,  # how far a ray may look for the wall on the first pass
     end_trim_mm=2.0,            # ignore this much at each path end
     junction_margin_mm=2.0,     # extra exclusion either side of a junction
-    min_path_fit_mm=15.0,       # shortest vessel that gets its own rigid fit
-    mismatch_mm=2.0,            # print/design centres further apart than this (after per-vessel fit) are not compared
+    min_path_fit_mm=15.0,       # shortest branch (included length) that gets its own rigid fit / centerline error
+    mismatch_mm=2.0,            # print/design centres further apart than this (after the branch fit) are not compared
     min_diameter_mm=0.0,        # design diameters below this are excluded as below CT resolution (0 = keep all)
     insert_hu=None,             # voxels >= this are an insert (e.g. a tube) and are treated as lumen (None = off)
     insert_dilate_mm=1.0,
-    exclude_mm=None,            # {vessel name: [[from_mm, to_mm], ...]} ranges along a centerline to leave out
+    exclude_mm=None,            # {branch name: [[from_mm, to_mm], ...]} ranges along a centerline to leave out
 )
 N_RAYS = 90
 ANG = np.linspace(0, 2 * np.pi, N_RAYS, endpoint=False)
@@ -376,10 +379,10 @@ def run(ct, centerlines, design_poly, params=None, progress=None):
         for i in range(len(Cp)):
             why = r["flag"][i] or ("no design section" if not np.isfinite(Do[i]) else "design mismatch" if mismatch[i]
                                    else "below CT resolution" if small[i] else "design artefact" if artefact[i] else "")
-            stations.append(dict(path=name, station=i, s_mm=float(r["s"][i]), excluded=why,
+            stations.append(dict(branch=name, station=i, s_mm=float(r["s"][i]), excluded=why,
                                  D_print_mm=float(r["D"][i]), D_design_mm=float(Do[i]), dD_mm=float(r["D"][i] - Do[i]),
                                  dD_pct=float(100 * (r["D"][i] - Do[i]) / Do[i]) if Do[i] > 0 else np.nan,
-                                 cl_dev_module_mm=float(dev_mod[i]), cl_dev_vessel_mm=float(dev_path[i]),
+                                 cl_dev_mm=float(dev_path[i]), cl_dev_whole_vessel_mm=float(dev_mod[i]),
                                  insert_hidden_frac=float(r["insert"][i]),
                                  x=float(r["C"][i, 0]), y=float(r["C"][i, 1]), z=float(r["C"][i, 2])))
         paths[name] = dict(s=r["s"], C=r["C"], T=r["T"], rings=r["rings"], ok=ok,
@@ -389,22 +392,21 @@ def run(ct, centerlines, design_poly, params=None, progress=None):
 
 
 def summarise(stations, step):
-    """Per vessel and for all vessels: n, length, diameter error stats, centerline error stats (valid stations)."""
+    """Per branch and for the whole vessel (ALL): n, length, diameter error and centerline error stats."""
     import math
-    names = list(dict.fromkeys(s["path"] for s in stations)) + ["ALL"]
+    names = list(dict.fromkeys(s["branch"] for s in stations)) + ["ALL"]
     out = []
     for nm in names:
-        v = [s for s in stations if s["excluded"] == "" and (nm == "ALL" or s["path"] == nm)]
+        v = [s for s in stations if s["excluded"] == "" and (nm == "ALL" or s["branch"] == nm)]
         a = lambda k: np.array([s[k] for s in v], float)
-        dD, pct, cm, cv = a("dD_mm"), a("dD_pct"), a("cl_dev_module_mm"), a("cl_dev_vessel_mm")
+        dD, pct, cl = a("dD_mm"), a("dD_pct"), a("cl_dev_mm")
         f = lambda fn, x: float(fn(x[np.isfinite(x)])) if np.isfinite(x).any() else math.nan
         sd = f(lambda x: np.std(x, ddof=1) if len(x) > 1 else math.nan, dD)
-        out.append(dict(vessel=nm, n_stations=len(v), length_mm=len(v) * step,
+        out.append(dict(branch=nm, n_stations=len(v), length_mm=len(v) * step,
                         dD_mean_mm=f(np.mean, dD), dD_sd_mm=sd, dD_LoA_low_mm=f(np.mean, dD) - 1.96 * sd,
                         dD_LoA_high_mm=f(np.mean, dD) + 1.96 * sd, dD_mean_pct=f(np.mean, pct),
-                        cl_module_mean_mm=f(np.mean, cm), cl_module_p95_mm=f(lambda x: np.percentile(x, 95), cm),
-                        cl_module_max_mm=f(np.max, cm), cl_vessel_mean_mm=f(np.mean, cv),
-                        cl_vessel_p95_mm=f(lambda x: np.percentile(x, 95), cv), cl_vessel_max_mm=f(np.max, cv)))
+                        cl_dev_mean_mm=f(np.mean, cl), cl_dev_p95_mm=f(lambda x: np.percentile(x, 95), cl),
+                        cl_dev_max_mm=f(np.max, cl)))
     return out
 
 

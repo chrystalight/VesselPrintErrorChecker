@@ -3,11 +3,13 @@
 This is a 3D Slicer module that measures how closely a 3D-printed vessel model matches its design. You give it:
 - a CT scan of the printed model;
 - the original lumen surface (STL);
-- a centerline for each vessel.
+- a centerline for each branch.
 
-It reports two errors along every vessel:
+A **vessel** here is one connected vessel tree (one CT and one design STL), for example the SIMONE Torso: the aorta plus its four branches. A **branch** is one centerline within it.
+
+It reports two errors along every branch, plus a summary for the whole vessel:
 - **Diameter error:** printed minus design lumen diameter, as the equivalent diameter 2√(A/π).
-- **Centerline error:** how far the printed vessel's path is from the design. It is reported twice: after one rigid fit for the whole model (this includes any bending of the model), and after a separate fit for each vessel (this leaves only the vessel's own shape).
+- **Centerline error:** the distance between the printed and design centerlines after the branch is rigidly aligned on its own. This measures the branch's printed shape. It is not affected by how a soft, elastic print happened to lie in the scanner.
 
 It was written to validate the SIMONE simulator's printed vessel modules. Their scans and designs are included, so you can run it straight away.
 
@@ -80,7 +82,7 @@ Run `git pull`, or download the ZIP again into the same place, then restart Slic
 |---|---|
 | **Printed CT** | Load it with Slicer's DICOM browser (or any volume format). |
 | **Design (STL)** | Drag the STL into Slicer. It must be the lumen surface (inner wall) of the design, in mm. |
-| **Centerlines** | Either click **Import SimVascular paths (.pth)...** and pick your path files (set *mm per unit* to 10 if SimVascular worked in cm), or draw one open curve per vessel with Markups → Curve. A curve only needs to run inside the printed lumen; it doesn't have to be centred. |
+| **Centerlines** | Either click **Import SimVascular paths (.pth)...** and pick your path files (set *mm per unit* to 10 if SimVascular worked in cm), or draw one open curve per branch with Markups → Curve. A curve only needs to run inside the printed lumen; it doesn't have to be centred. |
 
 The centerlines must be drawn on the printed CT, not on the design. The design can be in any position or orientation, because the module registers it automatically.
 
@@ -89,20 +91,19 @@ Tick **Treat bright insert as lumen** under *Parameters* if something bright, su
 To leave out a stretch you know is unreliable, such as a section that held water during scanning, fill in **Exclude ranges (mm)**. Give distances along the centerline, for example `Aorta: 0-60; ICA: 5-12`; several ranges per vessel are separated by commas. Excluded stretches are left out of the results and also out of the registration. They show as `user excluded` in the per-station table. The SIMONE Torso sample fills this in for you (`Aorta: 0-60`, where water pooled in the lower aorta).
 
 ## Outputs
-- **Summary table** (per vessel and overall) and **per-station table**. Switch between them with the drop-down, and save both with **Save tables as CSV...**.
-- **Diameter error plot** and **centerline error plot** for the vessel you are inspecting. Pick another vessel in *Inspect cross-section* to switch.
-  - **Diameter error:** printed minus design along the centerline, with a zero line. The title gives the vessel's mean.
-  - **Centerline error:** the solid line is the per-vessel fit (shape only) and the dashed line is the whole-module fit (includes bending).
+- **Summary table** (each branch, plus `ALL` for the whole vessel) and **per-station table**. Switch between them with the drop-down, and save both with **Save tables as CSV...**.
+- **Diameter error plot** and **centerline error plot** for the branch you are inspecting. Pick another branch in *Inspect cross-section* to switch.
+  - Both plots run along the branch's centerline, and each title gives the branch mean.
   - A grey vertical line marks the inspected station. Excluded stations are left as gaps.
-  - Use the summary table to compare vessels.
-- **Inspect cross-section:** choose a vessel and station, or click a point in either plot. The left view reslices the CT onto that cross-section and shows:
+  - Use the summary table to compare branches.
+- **Inspect cross-section:** choose a branch and station, or click a point in either plot. The left view reslices the CT onto that cross-section and shows:
   - the printed lumen (cyan);
   - the design lumen mapped into the CT (orange);
   - that station's numbers.
 
   The view re-centres and zooms onto the contours every time you change station, even if you have panned or zoomed in the meantime.
 - **3D view:** tick **Show 3D view** under *3D view*. A 3D panel opens next to the cross-section. It shows the measured printed lumen over a translucent grey copy of the design, registered into the CT.
-  - **Colour printed lumen by:** choose *Diameter error* (blue = narrower than designed, red = wider), *Centerline error (whole-module fit)*, *Centerline error (per-vessel fit)*, or *None*. A colour legend appears in the 3D view.
+  - **Colour printed lumen by:** choose *Diameter error* (blue = narrower than designed, red = wider), *Centerline error*, or *None*. A colour legend appears in the 3D view.
   - **Colour scale limit:** sets the end of the colour scale. Diameter error runs from −limit to +limit; centerline error runs from 0 to the limit.
   - **Centre 3D view on the inspected station:** keeps the 3D camera on the station you are inspecting, without changing your zoom or angle.
   - Only included stations are drawn. Gaps in the surface are excluded stations.
@@ -113,8 +114,9 @@ To leave out a stretch you know is unreliable, such as a section that held water
 | `s_mm` | distance along the centerline |
 | `D_print_mm`, `D_design_mm` | equivalent lumen diameters |
 | `dD_mm`, `dD_pct` | diameter error, print − design |
-| `cl_dev_module_mm` | centerline error, whole-model rigid fit |
-| `cl_dev_vessel_mm` | centerline error, per-vessel rigid fit (vessels of at least 15 mm) |
+| `branch` | which centerline the station belongs to |
+| `cl_dev_mm` | centerline error: distance to the design centerline after aligning this branch on its own (branches with at least 15 mm included) |
+| `cl_dev_whole_vessel_mm` | for reference only: the same distance after one alignment of the whole vessel. For elastic prints it includes how the vessel lay during the scan. |
 | `insert_hidden_frac` | fraction of the wall hidden by an insert |
 | `excluded` | empty if the station is included, otherwise the reason (see below) |
 | `x, y, z` | printed centerline point (CT world coordinates) |
@@ -124,16 +126,17 @@ To leave out a stretch you know is unreliable, such as a section that held water
 2. **Printed lumen:** the CT is resliced in a plane normal to the centerline. The wall is found on 90 rays (every 4°) at the **half-maximum** between the lumen level and the wall peak. A ray counts only if the wall is at least 250 HU above the lumen, and rays that disagree with their neighbours are dropped. Each ray is limited to the local lumen radius + 2.5 mm, so it cannot run into a neighbouring vessel.
 3. **Re-centring:** each section is re-centred on its lumen centroid and the tangent is re-estimated; this is done 3 times. The printed centerline is therefore measured from the CT, not taken from where the curve was drawn.
 4. **Registration:** the printed lumen is rigidly registered to the design with ICP. The search starts from 24 orientations × 9 positions. Each iteration only uses point pairs closer than a threshold that shrinks from 20 mm to 1.5 mm, which makes it robust to diameter bias and unmatched regions.
-5. **Design sections:** the design is sectioned normal to its own centerline at the matching stations, after a per-vessel fit, so bending of an elastic model cannot shift which part of the design is compared.
-6. **Exclusions:** each excluded station gets one of these reasons in the `excluded` column.
+5. **Design sections:** each branch is then aligned on its own, and the design is sectioned normal to its own centerline at the matching stations. This way, bending of an elastic print cannot shift which part of the design is compared.
+6. **Errors:** diameter error is printed minus design equivalent diameter. Centerline error is the distance from the printed to the design centerline after aligning the branch on its own (rigid ICP).
+7. **Exclusions:** each excluded station gets one of these reasons in the `excluded` column.
 
 | Reason | Meaning |
 |---|---|
 | `open` | more than 15% of rays found no wall: an outlet, a junction, or a lumen with no visible contrast |
 | `end` | within 2 mm of a centerline end |
-| `junction` | another vessel's centerline passes through the section (plus 2 mm either side) |
+| `junction` | another branch's centerline passes through the section (plus 2 mm either side) |
 | `insert contact` | an insert hides more than 25% of the wall |
-| `no design section` / `design mismatch` | the design vessel is not found where expected |
+| `no design section` / `design mismatch` | the design branch is not found where expected |
 | `design artefact` | the design section jumps away from its local trend, as at a capped outlet or a branch ostium |
 | `below CT resolution` | the design diameter is under the *Min design diameter* setting (0 = off) |
 | `user excluded` | inside a range given in *Exclude ranges (mm)* |

@@ -1,5 +1,5 @@
-vessel,n_stations,length_mm,dD_mean_mm,dD_sd_mm,dD_LoA_low_mm,dD_LoA_high_mm,dD_mean_pct,cl_module_mean_mm,cl_module_p95_mm,cl_module_max_mm,cl_vessel_mean_mm,cl_vessel_p95_mm,cl_vessel_max_mm
-DescendingAorta,86,43.0000,-0.2540,0.1934,-0.6331,0.1250,-2.9623,0.5097,0.8941,1.0663,0.1707,0.3701,0.5726
-LeftIliac,0,0.0000,nan,nan,nan,nan,nan,nan,nan,nan,nan,nan,nan
-RightIliac,0,0.0000,nan,nan,nan,nan,nan,nan,nan,nan,nan,nan,nan
-ALL,86,43.0000,-0.2540,0.1934,-0.6331,0.1250,-2.9623,0.5097,0.8941,1.0663,0.1707,0.3701,0.5726
+branch,n_stations,length_mm,dD_mean_mm,dD_sd_mm,dD_LoA_low_mm,dD_LoA_high_mm,dD_mean_pct,cl_dev_mean_mm,cl_dev_p95_mm,cl_dev_max_mm
+DescendingAorta,86,43.0000,-0.2540,0.1934,-0.6331,0.1250,-2.9623,0.1707,0.3701,0.5726
+LeftIliac,0,0.0000,nan,nan,nan,nan,nan,nan,nan,nan
+RightIliac,0,0.0000,nan,nan,nan,nan,nan,nan,nan,nan
+ALL,86,43.0000,-0.2540,0.1934,-0.6331,0.1250,-2.9623,0.1707,0.3701,0.5726
