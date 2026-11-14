@@ -1,0 +1,4 @@
+# CT slices and meshes are binary
+SIMONE_validation_files/*/CT/** binary
+*.stl binary
+*.png binary
