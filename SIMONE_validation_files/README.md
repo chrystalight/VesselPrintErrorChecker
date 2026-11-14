@@ -26,7 +26,7 @@ Some branch paths start in a common trunk and run along it together. The trunk i
 The ICA and ECA cross over each other near the bifurcation. Where the drawn ECA path runs through filled lumen there, the module deliberately does not let its centre jump across into the ICA.
 
 ## Expected results
-`expected_results/` has the summary and per-station CSVs from `scripts/run_headless.py` with default settings. Running a module in Slicer should give the same numbers, to within a station or two.
+`expected_results/` has the summary, per-station and Bland–Altman CSVs from `scripts/run_headless.py` with default settings. Running a module in Slicer should give the same numbers, to within a station or two.
 
 | Vessel | Diameter error, mean ± SD | Centerline error (rigid-body registration) | Stations (of which at junctions) |
 |---|---|---|---|

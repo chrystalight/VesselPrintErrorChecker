@@ -47,6 +47,7 @@ def run(name, ct_dir, design, paths_dir, mm_per_unit, insert_hu, out, params, ex
     os.makedirs(out, exist_ok=True)
     write_csv(res["stations"], os.path.join(out, f"{name}_stations.csv"))
     write_csv(summ, os.path.join(out, f"{name}_summary.csv"))
+    write_csv(core.bland_altman_rows(res["stations"]), os.path.join(out, f"{name}_bland_altman.csv"))
     print(f"\n   registration: " + ", ".join(f"{k} {v:.2f}" for k, v in res["registration"].items()))
     for r in summ:
         print(f"   {r['branch']:20s} n={r['n_stations']:4d}  diameter error {r['dD_mean_mm']:+.2f} ± {r['dD_sd_mm']:.2f} mm "

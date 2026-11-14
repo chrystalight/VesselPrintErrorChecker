@@ -159,7 +159,7 @@ class VesselPrintErrorCheckerWidget(ScriptedLoadableModuleWidget):
 
         rrow = qt.QHBoxLayout()
         self.tableChoice = qt.QComboBox(); self.tableChoice.addItems(["Summary table", "Per-station table"])
-        self.saveButton = qt.QPushButton("Save tables as CSV..."); self.saveButton.enabled = False
+        self.saveButton = qt.QPushButton("Export CSV..."); self.saveButton.enabled = False
         rrow.addWidget(self.tableChoice); rrow.addWidget(self.saveButton); self.layout.addLayout(rrow)
         self.layout.addStretch(1)
 
@@ -324,9 +324,12 @@ class VesselPrintErrorCheckerWidget(ScriptedLoadableModuleWidget):
     def onSave(self):
         folder = qt.QFileDialog.getExistingDirectory(None, "Save tables to folder")
         if folder:
-            for node in (self.logic.stationsTable, self.logic.summaryTable):
-                slicer.util.saveNode(node, os.path.join(folder, node.GetName().replace(" ", "_") + ".csv"))
-            self.status.text = f"Saved tables to {folder}"
+            lg = self.logic
+            core.write_csv(lg.result["stations"], os.path.join(folder, "VPE_stations.csv"))
+            core.write_csv(lg.summary, os.path.join(folder, "VPE_summary.csv"))
+            ba = core.bland_altman_rows(lg.result["stations"])
+            if ba: core.write_csv(ba, os.path.join(folder, "VPE_bland_altman.csv"))
+            self.status.text = f"Saved VPE_stations.csv, VPE_summary.csv and VPE_bland_altman.csv to {folder}"
 
     def cleanup(self):
         pass

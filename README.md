@@ -91,7 +91,7 @@ Tick **Treat bright insert as lumen** under *Parameters* if something bright, su
 To leave out a stretch you know is unreliable, such as a section that held water during scanning, fill in **Exclude ranges (mm)**. Give distances along the centerline, for example `Aorta: 0-60; ICA: 5-12`; several ranges per vessel are separated by commas. Excluded stretches are left out of the results and also out of the registration. They show as `user excluded` in the per-station table. The SIMONE Torso sample fills this in for you (`Aorta: 0-60`, where water pooled in the lower aorta).
 
 ## Outputs
-- **Summary table** (each branch, plus `ALL` for the whole vessel) and **per-station table**. Switch between them with the drop-down, and save both with **Save tables as CSV...**.
+- **Summary table** (each branch, plus `ALL` for the whole vessel) and **per-station table**. Switch between them with the drop-down, and export everything with **Export CSV...** (see *Exported files* below).
 - **Diameter error plot** and **centerline error plot** for the branch you are inspecting. Pick another branch in *Inspect cross-section* to switch.
   - Both plots run along the branch's centerline, and each title gives the branch mean.
   - A grey vertical line marks the inspected station. Excluded stations are left as gaps.
@@ -110,8 +110,44 @@ To leave out a stretch you know is unreliable, such as a section that held water
   - The surface is coloured from the nearest included station. Parts with nothing to compare against are grey. Fluid-filled stretches that were measured are drawn from their measured contours; stretches that could not be measured are missing from the surface.
   - The original design model is hidden in 3D because it sits in its own coordinate frame, away from the CT. The registered copy is called *VPE design (registered to CT)*.
 
+### Exported files
+**Export CSV...** asks for a folder and writes three files there. The command-line runner writes the same three, named after the sample (`Cranial_stations.csv`, ...).
+
+| File | One row per | Use |
+|---|---|---|
+| `VPE_bland_altman.csv` | included station | ready for a Bland–Altman plot: x = `mean_D_mm`, y = `diff_mm` |
+| `VPE_stations.csv` | station, included or not | everything measured, with the reason for each exclusion |
+| `VPE_summary.csv` | branch, plus `ALL` | the numbers in the summary table |
+
+**`VPE_bland_altman.csv`**
+
+| Column | Meaning |
+|---|---|
+| `branch`, `station`, `s_mm` | which centerline, station number along it (from 0), and distance along it |
+| `D_design_mm`, `D_print_mm` | equivalent lumen diameters of the design and the print |
+| `mean_D_mm` | (print + design) / 2: the Bland–Altman x axis |
+| `diff_mm` | print − design: the Bland–Altman y axis (same as `dD_mm`) |
+| `diff_pct` | the difference as a percentage of the design diameter |
+| `at_junction`, `fluid_filled`, `edited` | 1/0 flags, as in the per-station table, in case you want to mark or drop those points |
+
+The bias is the mean of `diff_mm` and the limits of agreement are mean ± 1.96 SD; both are already in `VPE_summary.csv` (`dD_mean_mm`, `dD_LoA_low_mm`, `dD_LoA_high_mm`). Stations are 0.5 mm apart along a vessel, so neighbouring points are not independent; the limits of agreement describe the spread along the vessel, not a confidence interval.
+
+**`VPE_summary.csv`**
+
+| Column | Meaning |
+|---|---|
+| `branch` | centerline name, or `ALL` for every included station of the vessel |
+| `n_stations`, `length_mm` | included stations, and the length they cover (stations × spacing) |
+| `dD_mean_mm`, `dD_sd_mm` | mean and standard deviation of the diameter error (print − design) |
+| `dD_LoA_low_mm`, `dD_LoA_high_mm` | Bland–Altman limits of agreement: mean ∓ 1.96 SD |
+| `dD_mean_pct` | mean diameter error as a percentage of the design diameter |
+| `cl_dev_mean_mm`, `cl_dev_p95_mm`, `cl_dev_max_mm` | centerline error: mean, 95th percentile and maximum |
+
+**`VPE_stations.csv`**
+
 | Column (per-station table) | Meaning |
 |---|---|
+| `station` | station number along the centerline, from 0 |
 | `s_mm` | distance along the centerline |
 | `D_print_mm`, `D_design_mm` | equivalent lumen diameters |
 | `dD_mm`, `dD_pct` | diameter error, print − design |

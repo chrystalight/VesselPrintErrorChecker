@@ -768,6 +768,21 @@ def lumen_surface(ct, res):
     return poly
 
 
+def bland_altman_rows(stations):
+    """One row per included station, ready for a Bland-Altman plot: x = mean_D_mm, y = diff_mm."""
+    return [dict(branch=s["branch"], station=s["station"], s_mm=s["s_mm"], D_design_mm=s["D_design_mm"], D_print_mm=s["D_print_mm"],
+                 mean_D_mm=(s["D_print_mm"] + s["D_design_mm"]) / 2, diff_mm=s["dD_mm"], diff_pct=s["dD_pct"],
+                 at_junction=s["at_junction"], fluid_filled=s["fluid_filled"], edited=s["edited"])
+            for s in stations if s["excluded"] == ""]
+
+
+def write_csv(rows, path):
+    import csv
+    with open(path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=list(rows[0])); w.writeheader()
+        for r in rows: w.writerow({k: (f"{v:.4f}" if isinstance(v, float) else v) for k, v in r.items()})
+
+
 def summarise(stations, step):
     """Per branch and for the whole vessel (ALL): n, length, diameter error and centerline error stats."""
     import math
