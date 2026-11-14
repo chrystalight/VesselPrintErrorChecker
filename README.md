@@ -86,9 +86,15 @@ The centerlines must be drawn on the printed CT, not on the design. The design c
 
 Tick **Treat bright insert as lumen** under *Parameters* if something bright, such as a tube, sits inside a vessel. Stations where it covers more than 25% of the wall are excluded.
 
+To leave out a stretch you know is unreliable, such as a section that held water during scanning, fill in **Exclude ranges (mm)**. Give distances along the centerline, for example `Aorta: 0-60; ICA: 5-12`; several ranges per vessel are separated by commas. Excluded stretches are left out of the results and also out of the registration. They show as `user excluded` in the per-station table. The SIMONE Torso sample fills this in for you (`Aorta: 0-60`, where water pooled in the lower aorta).
+
 ## Outputs
 - **Summary table** (per vessel and overall) and **per-station table**. Switch between them with the drop-down, and save both with **Save tables as CSV...**.
-- **Diameter error plot** and **centerline error plot** along each vessel. Excluded stations are left as gaps.
+- **Diameter error plot** and **centerline error plot** for the vessel you are inspecting. Pick another vessel in *Inspect cross-section* to switch.
+  - **Diameter error:** printed minus design along the centerline, with a zero line. The title gives the vessel's mean.
+  - **Centerline error:** the solid line is the per-vessel fit (shape only) and the dashed line is the whole-module fit (includes bending).
+  - A grey vertical line marks the inspected station. Excluded stations are left as gaps.
+  - Use the summary table to compare vessels.
 - **Inspect cross-section:** choose a vessel and station, or click a point in either plot. The left view reslices the CT onto that cross-section and shows:
   - the printed lumen (cyan);
   - the design lumen mapped into the CT (orange);
@@ -130,6 +136,7 @@ Tick **Treat bright insert as lumen** under *Parameters* if something bright, su
 | `no design section` / `design mismatch` | the design vessel is not found where expected |
 | `design artefact` | the design section jumps away from its local trend, as at a capped outlet or a branch ostium |
 | `below CT resolution` | the design diameter is under the *Min design diameter* setting (0 = off) |
+| `user excluded` | inside a range given in *Exclude ranges (mm)* |
 
 All parameters are under *Parameters* in the module, with tooltips.
 

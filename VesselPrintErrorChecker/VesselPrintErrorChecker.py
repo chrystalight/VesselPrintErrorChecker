@@ -93,6 +93,10 @@ class VesselPrintErrorCheckerWidget(ScriptedLoadableModuleWidget):
         self.unitsSpin.setToolTip("mm per SimVascular unit (10 if SimVascular worked in cm)")
         row.addWidget(self.importButton); row.addWidget(qt.QLabel("mm per unit:")); row.addWidget(self.unitsSpin)
         form.addRow(row)
+        self.excludeEdit = qt.QLineEdit(); self.excludeEdit.placeholderText = "optional, e.g.  Aorta: 0-60; ICA: 5-12"
+        self.excludeEdit.setToolTip("Stretches of a vessel to leave out, in mm along its centerline (e.g. a section that held "
+                                    "water during scanning). Format: Vessel: from-to, from-to; Vessel2: from-to")
+        form.addRow("Exclude ranges (mm):", self.excludeEdit)
 
         # --- parameters
         pbox = ctk.ctkCollapsibleButton(); pbox.text = "Parameters"; pbox.collapsed = True; self.layout.addWidget(pbox)
@@ -126,7 +130,8 @@ class VesselPrintErrorCheckerWidget(ScriptedLoadableModuleWidget):
         self.stationSlider = ctk.ctkSliderWidget(); self.stationSlider.decimals = 0; self.stationSlider.singleStep = 1
         self.stationSlider.minimum = 0; self.stationSlider.maximum = 0
         iform.addRow("Station:", self.stationSlider)
-        self.info = qt.QLabel("Run a measurement, then pick a station here or click a point in either plot.")
+        self.info = qt.QLabel("Run a measurement, then pick a vessel and station here, or click a point in either plot. "
+                              "The plots show the selected vessel; the grey line marks the inspected station.")
         self.info.wordWrap = True; iform.addRow(self.info)
         legend = qt.QLabel("<span style='color:#22d3ee'>■</span> printed lumen &nbsp; "
                            "<span style='color:#f59e0b'>■</span> design lumen (mapped into the CT)")
@@ -189,13 +194,16 @@ class VesselPrintErrorCheckerWidget(ScriptedLoadableModuleWidget):
             for c in curves: self.curvesSelector.setCheckState(c, qt.Qt.Checked)
             self.insertCheck.checked = cfg.get("insert_hu") is not None
             if cfg.get("insert_hu") is not None: self.insertHU.value = cfg["insert_hu"]
+            self.excludeEdit.text = core.format_exclude(cfg.get("exclude_mm"))
+            if cfg.get("_exclude_reason"): self.excludeEdit.setToolTip(f"SIMONE {name}: {cfg['_exclude_reason']}")
             self.status.text = f"Loaded SIMONE {name}. Click 'Measure print error'."
 
     def params(self):
         return dict(station_spacing_mm=self.spacing.value, max_search_radius_mm=self.search.value,
                     min_diameter_mm=self.minDiam.value, junction_margin_mm=self.junction.value,
                     end_trim_mm=self.trim.value, mismatch_mm=self.mismatch.value,
-                    insert_hu=self.insertHU.value if self.insertCheck.checked else None)
+                    insert_hu=self.insertHU.value if self.insertCheck.checked else None,
+                    exclude_mm=core.parse_exclude(self.excludeEdit.text))
 
     def onApply(self):
         ct, design, curves = self.ctSelector.currentNode(), self.designSelector.currentNode(), self.curvesSelector.checkedNodes()
@@ -259,6 +267,7 @@ class VesselPrintErrorCheckerWidget(ScriptedLoadableModuleWidget):
         name = self.vesselCombo.currentText
         if not name or self.logic.result is None: return
         st = self.logic.inspect(name, int(value), follow3D=self.show3D.checked and self.follow3D.checked)
+        self.logic.updatePlots(name, int(value))
         f = lambda x, fmt: "–" if x is None or not np.isfinite(x) else format(x, fmt)
         self.info.text = (f"<b>{name}</b>, s = {st['s_mm']:.1f} mm &nbsp; ({st['excluded'] or 'included'})<br>"
                           f"Diameter: printed {f(st['D_print_mm'], '.2f')} mm, design {f(st['D_design_mm'], '.2f')} mm, "
@@ -392,33 +401,70 @@ class VesselPrintErrorCheckerLogic(ScriptedLoadableModuleLogic):
         node.Modified(); return node
 
     def _plots(self):
+        """One table per vessel (all stations; excluded ones blank so they leave gaps) and one set of series per
+        vessel. The two charts only ever show the vessel being inspected (see updatePlots)."""
+        for n in getattr(self, "_plotNodes", []):
+            if slicer.mrmlScene.IsNodePresent(n): slicer.mrmlScene.RemoveNode(n)
+        self._plotNodes, self.seriesToPath, self.vesselSeries, self._plotted = [], {}, {}, None
         chartD = self._node("vtkMRMLPlotChartNode", "VPE diameter error")
         chartC = self._node("vtkMRMLPlotChartNode", "VPE centerline error")
-        for ch in (chartD, chartC): ch.RemoveAllPlotSeriesNodeIDs()
-        chartD.SetTitle("Diameter error, print − design (excluded stations not drawn)")
-        chartD.SetXAxisTitle("distance along centerline (mm)"); chartD.SetYAxisTitle("ΔD (mm)")
-        chartC.SetTitle("Centerline error: solid = per-vessel fit, dashed = whole-module fit")
-        chartC.SetXAxisTitle("distance along centerline (mm)"); chartC.SetYAxisTitle("deviation (mm)")
-        self.seriesToPath = {}
-        for k, (name, p) in enumerate(self.result["paths"].items()):
-            rows = [s for s in self.result["stations"] if s["path"] == name]
-            ok = p["ok"]; col = COLORS[k % len(COLORS)]
+        for ch in (chartD, chartC):
+            ch.RemoveAllPlotSeriesNodeIDs(); ch.SetXAxisTitle("distance along centerline (mm)")
+        chartD.SetYAxisTitle("print \u2212 design (mm)"); chartD.SetLegendVisibility(False)
+        chartC.SetYAxisTitle("distance (mm)"); chartC.SetLegendVisibility(True)
+
+        def series(name, table, x, y, color, dashed=False, marker=True, width=2):
+            sn = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLPlotSeriesNode", name); sn.SetHideFromEditors(True)
+            sn.SetAndObserveTableNodeID(table.GetID()); sn.SetXColumnName(x); sn.SetYColumnName(y)
+            sn.SetPlotType(slicer.vtkMRMLPlotSeriesNode.PlotTypeScatter)
+            sn.SetMarkerStyle(slicer.vtkMRMLPlotSeriesNode.MarkerStyleCircle if marker else slicer.vtkMRMLPlotSeriesNode.MarkerStyleNone)
+            sn.SetMarkerSize(3)
+            sn.SetLineStyle(slicer.vtkMRMLPlotSeriesNode.LineStyleDash if dashed else slicer.vtkMRMLPlotSeriesNode.LineStyleSolid)
+            sn.SetLineWidth(width); sn.SetColor(*color); self._plotNodes.append(sn); return sn
+
+        for name, p in self.result["paths"].items():
+            rows = [st for st in self.result["stations"] if st["path"] == name]; ok = p["ok"]
             masked = lambda key: [r[key] if ok[i] else np.nan for i, r in enumerate(rows)]
-            t = self._table(f"VPE plot {name}", [dict(s_mm=r["s_mm"], dD_mm=a, cl_module_mm=b, cl_vessel_mm=c)
-                                                  for r, a, b, c in zip(rows, masked("dD_mm"), masked("cl_dev_module_mm"), masked("cl_dev_vessel_mm"))])
+            t = self._table(f"VPE plot {name}", [dict(s_mm=r["s_mm"], dD_mm=a, cl_module_mm=b, cl_vessel_mm=c) for r, a, b, c in
+                                                  zip(rows, masked("dD_mm"), masked("cl_dev_module_mm"), masked("cl_dev_vessel_mm"))])
             t.SetHideFromEditors(True)
-            for chart, ycol, label, dashed in [(chartD, "dD_mm", name, False), (chartC, "cl_vessel_mm", f"{name} (vessel)", False),
-                                               (chartC, "cl_module_mm", f"{name} (module)", True)]:
-                s = self._node("vtkMRMLPlotSeriesNode", f"VPE {chart.GetName()[4:]} {label}", hidden=True)
-                s.SetName(label); s.SetAndObserveTableNodeID(t.GetID())
-                s.SetXColumnName("s_mm"); s.SetYColumnName(ycol)
-                s.SetPlotType(slicer.vtkMRMLPlotSeriesNode.PlotTypeScatter)
-                s.SetMarkerStyle(slicer.vtkMRMLPlotSeriesNode.MarkerStyleNone if dashed else slicer.vtkMRMLPlotSeriesNode.MarkerStyleCircle)
-                s.SetMarkerSize(4)
-                s.SetLineStyle(slicer.vtkMRMLPlotSeriesNode.LineStyleDash if dashed else slicer.vtkMRMLPlotSeriesNode.LineStyleSolid)
-                s.SetLineWidth(2); s.SetColor(*col)
-                chart.AddAndObservePlotSeriesNodeID(s.GetID()); self.seriesToPath[s.GetID()] = name
+            sD = series("diameter error", t, "s_mm", "dD_mm", (0.16, 0.47, 0.84))
+            sV = series("per-vessel fit (shape only)", t, "s_mm", "cl_vessel_mm", (0.16, 0.47, 0.84))
+            sM = series("whole-module fit (includes bending)", t, "s_mm", "cl_module_mm", (0.80, 0.45, 0.12), dashed=True, marker=False)
+            for sn in (sD, sV, sM): self.seriesToPath[sn.GetID()] = name
+            self.vesselSeries[name] = (sD, sV, sM, rows, ok)
+        # zero line and station marker, shared by both charts
+        self.guideTable = self._table("VPE plot guides", [dict(x=0.0, zero=0.0, yD=0.0, yC=0.0), dict(x=1.0, zero=0.0, yD=0.0, yC=0.0)])
+        self.markerTable = self._table("VPE plot marker", [dict(x=0.0, yD=0.0, yC=0.0), dict(x=0.0, yD=0.0, yC=0.0)])
+        for t in (self.guideTable, self.markerTable): t.SetHideFromEditors(True)
+        self.zeroSeries = series("zero", self.guideTable, "x", "zero", (0.55, 0.55, 0.55), marker=False, width=1)
+        self.markD = series("inspected station", self.markerTable, "x", "yD", (0.35, 0.35, 0.35), marker=False, width=1)
+        self.markC = series("inspected station", self.markerTable, "x", "yC", (0.35, 0.35, 0.35), marker=False, width=1)
         self.chartD, self.chartC = chartD, chartC
+
+    def updatePlots(self, name, i):
+        """Show only vessel `name` in both charts, with a vertical line at station i."""
+        if name not in getattr(self, "vesselSeries", {}): return
+        sD, sV, sM, rows, ok = self.vesselSeries[name]
+        s_all = np.array([r["s_mm"] for r in rows])
+        val = lambda k: np.array([r[k] if ok[j] else np.nan for j, r in enumerate(rows)], float)
+        dD, cv, cm = val("dD_mm"), val("cl_dev_vessel_mm"), val("cl_dev_module_mm")
+        fin = lambda a: a[np.isfinite(a)]
+        lo = min(0.0, *fin(dD)) if fin(dD).size else -1.0; hi = max(0.0, *fin(dD)) if fin(dD).size else 1.0
+        top = max([1e-3] + list(fin(cv)) + list(fin(cm)))
+        if self._plotted != name:
+            for ch in (self.chartD, self.chartC): ch.RemoveAllPlotSeriesNodeIDs()
+            for sn in (self.zeroSeries, sD, self.markD): self.chartD.AddAndObservePlotSeriesNodeID(sn.GetID())
+            for sn in (self.zeroSeries, sV, sM, self.markC): self.chartC.AddAndObservePlotSeriesNodeID(sn.GetID())
+            n_ok = int(ok.sum()); m = fin(dD)
+            self.chartD.SetTitle(f"{name}: diameter error" + (f"  (mean {m.mean():+.2f} mm, n = {n_ok})" if m.size else "  (no included stations)"))
+            self.chartC.SetTitle(f"{name}: centerline error")
+            g = self.guideTable.GetTable(); g.SetValue(0, 0, float(s_all[0])); g.SetValue(1, 0, float(s_all[-1])); g.Modified()
+            self._plotted = name
+        t = self.markerTable.GetTable(); x = float(s_all[i])
+        for r, (yd, yc) in enumerate([(lo - 0.1 * (hi - lo + 1e-6), 0.0), (hi + 0.1 * (hi - lo + 1e-6), top * 1.1)]):
+            t.SetValue(r, 0, x); t.SetValue(r, 1, float(yd)); t.SetValue(r, 2, float(yc))
+        t.Modified(); self.markerTable.Modified()
 
     def showLayout(self, with3D=False):
         lm = slicer.app.layoutManager(); ln = lm.layoutLogic().GetLayoutNode()

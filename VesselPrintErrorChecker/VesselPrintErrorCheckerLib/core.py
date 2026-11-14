@@ -25,6 +25,7 @@ DEFAULTS = dict(
     min_diameter_mm=0.0,        # design diameters below this are excluded as below CT resolution (0 = keep all)
     insert_hu=None,             # voxels >= this are an insert (e.g. a tube) and are treated as lumen (None = off)
     insert_dilate_mm=1.0,
+    exclude_mm=None,            # {vessel name: [[from_mm, to_mm], ...]} ranges along a centerline to leave out
 )
 N_RAYS = 90
 ANG = np.linspace(0, 2 * np.pi, N_RAYS, endpoint=False)
@@ -324,6 +325,8 @@ def run(ct, centerlines, design_poly, params=None, progress=None):
         flag[r["bad"] > MAX_BAD_RAYS] = "open"; flag[~np.isfinite(r["D"])] = "open"
         flag[r["insert"] > MAX_INSERT_RAYS] = "insert contact"
         flag[(r["s"] < p["end_trim_mm"]) | (r["s"] > r["s"][-1] - p["end_trim_mm"])] = "end"
+        for lo, hi in (p.get("exclude_mm") or {}).get(name, []):     # user-chosen ranges, e.g. a water-filled stretch
+            flag[(r["s"] >= lo) & (r["s"] <= hi)] = "user excluded"
         junc = np.zeros(len(r["s"]), bool)
         for other, o in pr.items():
             if other == name: continue
@@ -403,6 +406,23 @@ def summarise(stations, step):
                         cl_module_max_mm=f(np.max, cm), cl_vessel_mean_mm=f(np.mean, cv),
                         cl_vessel_p95_mm=f(lambda x: np.percentile(x, 95), cv), cl_vessel_max_mm=f(np.max, cv)))
     return out
+
+
+def parse_exclude(text):
+    """'Aorta: 0-60, 100-110; ICA: 5-12'  ->  {'Aorta': [[0, 60], [100, 110]], 'ICA': [[5, 12]]}"""
+    out = {}
+    for part in (text or "").split(";"):
+        if ":" not in part: continue
+        name, ranges = part.split(":", 1)
+        for rg in ranges.split(","):
+            if "-" not in rg: continue
+            lo, hi = rg.strip().split("-", 1)
+            out.setdefault(name.strip(), []).append([float(lo), float(hi)])
+    return out
+
+
+def format_exclude(d):
+    return "; ".join(f"{k}: " + ", ".join(f"{lo:g}-{hi:g}" for lo, hi in v) for k, v in (d or {}).items())
 
 
 def read_pth(path, scale=10.0, lps_to_ras=True):
